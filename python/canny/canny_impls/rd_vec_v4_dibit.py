@@ -235,27 +235,48 @@ def _compute_hysteresis_auto_thresholds(
     """
 
     histogram, _ = np.histogram(gradients_i, bins=HISTOGRAM_BIN_COUNT, range=(0.0, 1.0))
-    cumulative_histogram = np.cumsum(histogram)
-    cumulative_histogram -= cumulative_histogram[0]
+    cumulative_histogram = np.cumsum(histogram[1:])
 
     total_pixels = cumulative_histogram[-1]
 
-    low_threshold = np.searchsorted(
+    low_threshold_idx = np.searchsorted(
         cumulative_histogram, (1.0 - low_prop) * total_pixels, side="right"
     )
-    high_threshold = (
+    high_threshold_idx = (
         np.searchsorted(
-            cumulative_histogram[low_threshold:],
+            cumulative_histogram[low_threshold_idx:],
             (1.0 - high_prop) * total_pixels,
             side="right",
         )
-        + low_threshold
+        + low_threshold_idx
     )
 
-    histo_low = float(low_threshold) / HISTOGRAM_BIN_COUNT
-    hist_high = float(high_threshold) / HISTOGRAM_BIN_COUNT
+    # +1 because we skip the first bucket
+    low = float(low_threshold_idx + 1)  # / HISTOGRAM_BIN_COUNT
+    high = float(high_threshold_idx + 1)  # / HISTOGRAM_BIN_COUNT
 
-    return histo_low, hist_high
+    return low, high
+
+
+def compute_hysteresis_auto_thresholds(
+    gradients_i: np.array, low_high_prop_i: np.array
+) -> tuple[float, float]:
+    """Compute the hysteresis thresholds based on the gradient strength.
+
+    :param gradients_i: Edge strength of the image in range [0.,1.]
+    :type gradients_i: np.array
+
+    :param low_high_prop: Array with the proportion of the lowest and highest gradient values to be used as the low and high threshold
+    :type low_high_prop: np.array with shape (2,) with dtype = np.float32
+
+    :return: (low, high): [0]: Low threshold for the hysteresis, [1]: High threshold for the hysteresis
+    :rtype: np.array with shape (2,) with dtype = np.floating
+    """
+
+    low, high = _compute_hysteresis_auto_thresholds(
+        gradients_i, low_high_prop_i[0], low_high_prop_i[1]
+    )
+    return [low, high]
 
 
 def _hysteresis(gradients_i: np.array, low: float, high: float) -> np.array:

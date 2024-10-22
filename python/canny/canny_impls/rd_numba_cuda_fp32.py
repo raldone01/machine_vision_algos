@@ -9,7 +9,8 @@ import numba as nb
 from numba import cuda
 import math
 from utils.attr_dict import AttrDict
-from numba.types import void, float32, uint8
+from numba.types import void, float32, uint8, uint32
+from icecream import ic
 
 TPB = 16
 
@@ -150,11 +151,13 @@ def blur_gauss(image_u8_i: np.array, sigma: float) -> np.array:
     )
 
     # Allocate output array
-    d_image_o = cuda.device_array(image_u8_i.shape, dtype=np.float32, stream=stream)
+    d_blurred_o = cuda.device_array(image_u8_i.shape, dtype=np.float32, stream=stream)
     # Apply Gaussian filter
-    _kernel_gauss[blockspergrid, (TPB, TPB), stream](d_image_i, d_image_o, sigma)
+    _kernel_gauss[blockspergrid, (TPB, TPB), stream](d_image_i, d_blurred_o, sigma)
 
-    blurred = d_image_o if input_on_device else d_image_o.copy_to_host(stream=stream)
+    blurred = (
+        d_blurred_o if input_on_device else d_blurred_o.copy_to_host(stream=stream)
+    )
 
     # Reset warnings
     nb.config.CUDA_LOW_OCCUPANCY_WARNINGS = old_cuda_low_occupancy_warnings
@@ -293,17 +296,20 @@ def sobel_gradients(image_i: np.array) -> tuple[np.array, np.array]:
     return gradients_o, orientations_o
 
 
-# TODO: check if its faster to use a three arrays instead of the io parameter
-@cuda.jit(fastmath=True, device=True, func_or_sig=void(float32[:, :], float32[:, :]))
-def _dev_non_max(gradients_io, orientations_o):
+@cuda.jit(
+    fastmath=True,
+    device=True,
+    func_or_sig=void(float32[:, :], float32[:, :], float32[:, :]),
+)
+def _dev_non_max(gradients_i: np.array, orientations_i: np.array, edges_o: np.array):
     x, y = cuda.grid(2)
-    x_width, y_height = gradients_io.shape
+    x_width, y_height = gradients_i.shape
 
     if x >= x_width or y >= y_height:
         return
 
-    orientation = orientations_o[x, y]
-    gradient = gradients_io[x, y]
+    gradient = gradients_i[x, y]
+    orientation = orientations_i[x, y]
 
     # Compute neighbour mask: top, bottom sector
     mask_vertical = (
@@ -312,10 +318,10 @@ def _dev_non_max(gradients_io, orientations_o):
     )
     gradient_right = 0
     if x + 1 < x_width:
-        gradient_right = gradients_io[x + 1, y]
+        gradient_right = gradients_i[x + 1, y]
     gradient_left = 0
     if x - 1 >= 0:
-        gradient_left = gradients_io[x - 1, y]
+        gradient_left = gradients_i[x - 1, y]
     mask = mask_vertical & (
         (gradient >= gradient_right)  # right
         & (gradient > gradient_left)  # left
@@ -330,10 +336,10 @@ def _dev_non_max(gradients_io, orientations_o):
     )
     gradient_top_left = 0
     if x - 1 >= 0 and y - 1 >= 0:
-        gradient_top_left = gradients_io[x - 1, y - 1]
+        gradient_top_left = gradients_i[x - 1, y - 1]
     gradient_bottom_right = 0
     if x + 1 < x_width and y + 1 < y_height:
-        gradient_bottom_right = gradients_io[x + 1, y + 1]
+        gradient_bottom_right = gradients_i[x + 1, y + 1]
     mask |= (
         mask_diag_1_tr_bl
         & (gradient > gradient_top_left)  # top left
@@ -348,10 +354,10 @@ def _dev_non_max(gradients_io, orientations_o):
     )
     gradient_top = 0
     if y - 1 >= 0:
-        gradient_top = gradients_io[x, y - 1]
+        gradient_top = gradients_i[x, y - 1]
     gradient_bottom = 0
     if y + 1 < y_height:
-        gradient_bottom = gradients_io[x, y + 1]
+        gradient_bottom = gradients_i[x, y + 1]
     mask |= (
         mask_horizontal
         & (gradient > gradient_top)  # top
@@ -366,22 +372,22 @@ def _dev_non_max(gradients_io, orientations_o):
     )
     gradient_top_right = 0
     if x + 1 < x_width and y - 1 >= 0:
-        gradient_top_right = gradients_io[x + 1, y - 1]
+        gradient_top_right = gradients_i[x + 1, y - 1]
     gradient_bottom_left = 0
     if x - 1 >= 0 and y + 1 < y_height:
-        gradient_bottom_left = gradients_io[x - 1, y + 1]
+        gradient_bottom_left = gradients_i[x - 1, y + 1]
     mask |= (
         mask_diag_2_tl_br
         & (gradient > gradient_top_right)  # top right
         & (gradient > gradient_bottom_left)  # bottom left
     )
 
-    gradients_io[x, y] = mask * gradient
+    edges_o[x, y] = mask * gradient
 
 
-@cuda.jit(fastmath=True, func_or_sig=void(float32[:, :], float32[:, :]))
-def _kernel_non_max(gradients_io: np.array, orientations_o: np.array):
-    _dev_non_max(gradients_io, orientations_o)
+@cuda.jit(fastmath=True, func_or_sig=void(float32[:, :], float32[:, :], float32[:, :]))
+def _kernel_non_max(gradients_i: np.array, orientations_o: np.array, edges_o: np.array):
+    _dev_non_max(gradients_i, orientations_o, edges_o)
 
 
 def non_max(gradients_i: np.array, orientations_i: np.array) -> np.array:
@@ -413,31 +419,31 @@ def non_max(gradients_i: np.array, orientations_i: np.array) -> np.array:
     blockspergrid = (blockspergrid_x, blockspergrid_y)
 
     # Check if the gradients and orientations are already on the device
-    gradients_on_device = is_cuda_array(gradients_i)
-    orientations_on_device = is_cuda_array(orientations_i)
+    gradients_i_on_device = is_cuda_array(gradients_i)
+    orientations_i_on_device = is_cuda_array(orientations_i)
+    any_input_on_device = gradients_i_on_device or orientations_i_on_device
 
-    if not gradients_on_device:
-        d_gradients = cuda.to_device(gradients_i, stream=stream)
-    else:
-        # Allocate a new array to store the gradients
-        d_gradients = cuda.device_array(
-            (height, width), dtype=np.float32, stream=stream
-        )
-        # Copy the input image to the new array
-        _kernel_copy_devarray2d[blockspergrid, (TPB, TPB), stream](
-            gradients_i, d_gradients
-        )
+    d_gradients_i = (
+        gradients_i
+        if gradients_i_on_device
+        else cuda.to_device(gradients_i, stream=stream)
+    )
 
-    d_orientations = (
+    d_orientations_i = (
         orientations_i
-        if orientations_on_device
+        if orientations_i_on_device
         else cuda.to_device(orientations_i, stream=stream)
     )
 
-    _kernel_non_max[blockspergrid, (TPB, TPB), stream](d_gradients, d_orientations)
+    # Allocate output arrays
+    d_edges_o = cuda.device_array((height, width), dtype=np.float32, stream=stream)
 
-    gradients = (
-        d_gradients if gradients_on_device else d_gradients.copy_to_host(stream=stream)
+    _kernel_non_max[blockspergrid, (TPB, TPB), stream](
+        d_gradients_i, d_orientations_i, d_edges_o
+    )
+
+    edges_o = (
+        d_edges_o if any_input_on_device else d_edges_o.copy_to_host(stream=stream)
     )
 
     # Reset warnings
@@ -445,69 +451,237 @@ def non_max(gradients_i: np.array, orientations_i: np.array) -> np.array:
 
     stream.synchronize()
 
-    return gradients
+    return edges_o
 
 
 HISTOGRAM_BIN_COUNT = 256
 
 
-@cuda.jit(fastmath=True, device=True, func_or_sig=void(float32[:, :], float32[:]))
-def _dev_compute_hysteresis_auto_thresholds(
-    gradients_i: np.array, low_high_thresholds_io: np.array
-) -> tuple[float, float]:
-    x, y = cuda.grid(2)
-    x_width, y_height = gradients_i.shape
+# https://developer.nvidia.com/blog/gpu-pro-tip-fast-histograms-using-shared-atomics-maxwell/
+@cuda.jit(fastmath=True, func_or_sig=void(float32[:, :], uint32[:]))
+def _kernel_compute_edge_histogram_partial(
+    edges_i: np.array, partial_histograms_o: np.array
+):
+    x_width, y_height = edges_i.shape
 
-    if x >= x_width or y >= y_height:
-        return
+    # pixel coordinates
+    x = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
+    y = cuda.blockIdx.y * cuda.blockDim.y + cuda.threadIdx.y
 
-    gradient = gradients_i[x, y]
+    # grid dimensions
+    nx = cuda.gridDim.x * cuda.blockDim.x
+    ny = cuda.gridDim.y * cuda.blockDim.y
 
-    # Compute the histogram of the gradients
-    histogram = cuda.shared.array(HISTOGRAM_BIN_COUNT, float32)
+    # linear thread index within 2D block
+    linear_tid = cuda.threadIdx.x + cuda.threadIdx.y * cuda.blockDim.x
 
-    histogram_bin_width = 1.0 / HISTOGRAM_BIN_COUNT
-    bin_idx = int(gradient / histogram_bin_width)
-    if bin_idx >= HISTOGRAM_BIN_COUNT:
-        bin_idx = HISTOGRAM_BIN_COUNT - 1
-    cuda.atomic.add(histogram, bin_idx, 1)
+    # total number of threads in the 2D block
+    BLOCK_THREADS = cuda.blockDim.x * cuda.blockDim.y
+
+    # linear block index within 2D grid
+    g = cuda.blockIdx.x + cuda.blockIdx.y * cuda.gridDim.x
+
+    # Initialize shared memory
+    shared = cuda.shared.array(shape=HISTOGRAM_BIN_COUNT, dtype=nb.types.uint32)
+    # Initialize the histogram bins to zero
+    for i in range(linear_tid, HISTOGRAM_BIN_COUNT, BLOCK_THREADS):
+        shared[i] = 0
+    cuda.syncthreads()
+
+    # Process the edges
+    # NOTE: There is a faster way to do this using radix sort and tracking the discontinuities but it is way more complex
+    # https://github.com/NVIDIA/cccl/blob/a8dd6912d080173ff731c0e79a8a87647164ecd8/cub/cub/block/block_histogram.cuh#L296
+
+    # Write our block's partial histogram to shared memory
+    for col in range(x, x_width, nx):
+        for row in range(y, y_height, ny):
+            edge_int = uint32(edges_i[col, row] * HISTOGRAM_BIN_COUNT)
+            edge_int = min(HISTOGRAM_BIN_COUNT - 1, edge_int)
+            if edge_int == 0:
+                # Skip the zero bin. That's where all the suppressed edges fall into.
+                # That causes a lot of collisions and slows down the histogram computation.
+                # And we don't need the zero bin anyway.
+                continue
+            cuda.atomic.add(shared, edge_int, 1)
+    cuda.syncthreads()
+
+    # Write the partial histogram into the global memory
+    global_memory_histogram_offset = g * HISTOGRAM_BIN_COUNT
+    for i in range(linear_tid, HISTOGRAM_BIN_COUNT, BLOCK_THREADS):
+        partial_histograms_o[global_memory_histogram_offset + i] = shared[i]
+
+
+@cuda.jit(fastmath=True, func_or_sig=void(uint32[:], float32[:], float32[:]))
+def _kernel_compute_edge_histogram_final_accum(
+    partial_histograms_i: np.array,
+    low_high_prop_i: np.array,
+    low_high_thresholds_o: np.array,
+):
+    x = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
+
+    # Make sure the low and high thresholds are initialized
+    if x < 2:
+        low_high_thresholds_o[x] = 69.0
+
+    x_partial_histogram_count = partial_histograms_i.shape[0] // HISTOGRAM_BIN_COUNT
+
+    # if x == 0:
+    #    print("x_partial_histogram_count", x_partial_histogram_count)
+
+    # NOTE: These are essentially HISTOGRAM_BIN_COUNT parallel cumulative sums
+    # https://people.cs.vt.edu/yongcao/teaching/cs5234/spring2013/slides/Lecture10.pdf
+    # https://en.wikipedia.org/wiki/Prefix_sum
+    # https://developer.nvidia.com/gpugems/gpugems3/part-vi-gpu-computing/chapter-39-parallel-prefix-sum-scan-cuda
+
+    # Sum all the partial histograms
+    histogram_non_cumulative = cuda.shared.array(
+        shape=HISTOGRAM_BIN_COUNT, dtype=nb.types.uint32
+    )
+    if x < HISTOGRAM_BIN_COUNT:
+        total = 0
+        for i in range(x_partial_histogram_count):
+            total += partial_histograms_i[x + i * HISTOGRAM_BIN_COUNT]
+        histogram_non_cumulative[x] = total
+        # print("X", x, "total", total)
+    cuda.syncthreads()
+
+    # Calculate the final cumulative histogram
+    histogram_cumulative = cuda.shared.array(
+        shape=HISTOGRAM_BIN_COUNT, dtype=nb.types.uint32
+    )
+    if x < HISTOGRAM_BIN_COUNT:
+        total = 0
+        # The first bucket is empty anyway
+        for i in range(1, x + 1):
+            total += histogram_non_cumulative[i]
+        histogram_cumulative[x] = total
+        # print("C", x, "total", total)
 
     cuda.syncthreads()
-    # TODO: check if its better if all threads but one return early here
 
-    low_prop = low_high_thresholds_io[0]
-    high_prop = low_high_thresholds_io[1]
+    low_prop, high_prop = low_high_prop_i[0], low_high_prop_i[1]
 
-    total_pixels = x_width * y_height
-    low_pixels = total_pixels * low_prop
-    high_pixels = total_pixels * high_prop
+    total_pixels = histogram_cumulative[HISTOGRAM_BIN_COUNT - 1]
+    low_pixels = total_pixels * (1.0 - low_prop)
+    high_pixels = total_pixels * (1.0 - high_prop)
 
-    pixel_bucket_sum = 0
-    low_threshold = 0.0
-    high_threshold = 0.0
-    # cumsum but skip the first bin because it contains all the zero pixels
-    for i in range(1, HISTOGRAM_BIN_COUNT):
-        pixel_bucket_sum += histogram[i]
-        if low_threshold == 0.0 and pixel_bucket_sum >= low_pixels:
-            low_threshold = i * histogram_bin_width
-        if pixel_bucket_sum >= high_pixels:
-            high_threshold = i * histogram_bin_width
-            break
+    if x == 0:
+        print(
+            "total_pixels",
+            total_pixels,
+            "low_pixels",
+            low_pixels,
+            "high_pixels",
+            high_pixels,
+        )
 
-    # TODO: check if its better if only one thread writes the result
-    low_high_thresholds_io[0] = low_threshold
-    low_high_thresholds_io[1] = high_threshold
+    # Every thread looks at his own bucket and the next one to decide if it is the low or high threshold
+    if x < HISTOGRAM_BIN_COUNT:
+        bucket = histogram_cumulative[x]
+        if bucket <= low_pixels:
+            # We might have found the low threshold.
+            # Check if the next bucket is above the low threshold.
+            next_bucket_idx = x + 1
+            if next_bucket_idx < HISTOGRAM_BIN_COUNT:
+                next_bucket = histogram_cumulative[next_bucket_idx]
+            else:
+                next_bucket = 0xFFFFFFFF
+            print("LC", x, bucket, next_bucket)
+            if next_bucket >= low_pixels:
+                print("L", x, next_bucket)
+                low_high_thresholds_o[0] = x  # / HISTOGRAM_BIN_COUNT
+        if bucket <= high_pixels:
+            # We might have found the high threshold.
+            # Check if the next bucket is above the high threshold.
+            next_bucket_idx = x + 1
+            if next_bucket_idx < HISTOGRAM_BIN_COUNT:
+                next_bucket = histogram_cumulative[next_bucket_idx]
+            else:
+                next_bucket = 0xFFFFFFFF
+            print("HC", x, bucket, next_bucket)
+            if next_bucket >= high_pixels:
+                print("H", x, next_bucket)
+                low_high_thresholds_o[1] = x  # / HISTOGRAM_BIN_COUNT
 
 
-@cuda.jit(fastmath=True, func_or_sig=void(float32[:, :], float32[:]))
-def _kernel_compute_hysteresis_auto_thresholds(
-    gradients_i: np.array, low_high_thresholds_io: np.array
+def compute_hysteresis_auto_thresholds(
+    gradients_i: np.array, low_high_prop_i: np.array
 ) -> tuple[float, float]:
-    _dev_compute_hysteresis_auto_thresholds(gradients_i, low_high_thresholds_io)
+    """Compute the hysteresis thresholds based on the gradient strength.
+
+    :param gradients_i: Edge strength of the image in range [0.,1.]
+    :type gradients_i: np.array
+
+    :param low_high_prop: Array with the proportion of the lowest and highest gradient values to be used as the low and high threshold
+    :type low_high_prop: np.array with shape (2,) with dtype = np.float32
+
+    :return: (low, high): [0]: Low threshold for the hysteresis, [1]: High threshold for the hysteresis
+    :rtype: np.array with shape (2,) with dtype = np.floating
+    """
+
+    # Disable warnings about low gpu utilization in the test suite
+    old_cuda_low_occupancy_warnings = nb.config.CUDA_LOW_OCCUPANCY_WARNINGS
+    nb.config.CUDA_LOW_OCCUPANCY_WARNINGS = 0
+
+    stream = cuda.stream()
+
+    height, width = gradients_i.shape
+    blockspergrid_x = math.ceil(height / TPB)
+    blockspergrid_y = math.ceil(width / TPB)
+    blockspergrid = (blockspergrid_x, blockspergrid_y)
+
+    # Check if the image buffer needs to be copied to the device
+    input_on_device = is_cuda_array(gradients_i)
+    d_gradients_i = (
+        gradients_i if input_on_device else cuda.to_device(gradients_i, stream=stream)
+    )
+
+    # Check if the low_high_prop buffer needs to be copied to the device
+    low_high_prop_on_device = is_cuda_array(low_high_prop_i)
+    d_low_high_prop_i = (
+        low_high_prop_i
+        if low_high_prop_on_device
+        else cuda.to_device(low_high_prop_i, stream=stream)
+    )
+
+    # Allocate output arrays
+    d_low_high_thresholds_o = cuda.device_array(2, dtype=np.float32, stream=stream)
+    histogram_count = blockspergrid_x * blockspergrid_y
+
+    ic(histogram_count)
+
+    d_partial_histograms = cuda.device_array(
+        histogram_count * HISTOGRAM_BIN_COUNT,
+        dtype=np.uint32,
+        stream=stream,
+    )
+
+    # Compute the auto thresholds
+    _kernel_compute_edge_histogram_partial[blockspergrid, (TPB, TPB), stream](
+        d_gradients_i, d_partial_histograms
+    )
+    _kernel_compute_edge_histogram_final_accum[
+        1, max(histogram_count, HISTOGRAM_BIN_COUNT), stream
+    ](d_partial_histograms, d_low_high_prop_i, d_low_high_thresholds_o)
+
+    low_high_thresholds_o = (
+        d_low_high_thresholds_o
+        if input_on_device
+        else d_low_high_thresholds_o.copy_to_host(stream=stream)
+    )
+
+    # Reset warnings
+    nb.config.CUDA_LOW_OCCUPANCY_WARNINGS = old_cuda_low_occupancy_warnings
+
+    stream.synchronize()
+
+    return low_high_thresholds_o
 
 
 @cuda.jit(fastmath=True, device=True, func_or_sig=void(float32[:, :], float32, float32))
-def _dev_hysteresis(gradients_io, low_threshold, high_threshold):
+def _dev_hysteresis(
+    gradients_io: np.array, low_threshold: np.array, high_threshold: np.array
+):
     """
     Apply hysteresis thresholding to the gradients array.
     We do ab breadth-first search to find connected edges.
@@ -565,8 +739,7 @@ def _kernel_hysteresis(
 def canny_edge_detection(
     image_u8_i: np.array,
     sigma: float,
-    low: float,
-    high: float,
+    low_high: np.array,
     auto_threshold: bool = False,
 ) -> np.array:
     """Apply Canny edge detection to the input image.
@@ -577,11 +750,8 @@ def canny_edge_detection(
     :param sigma: Standard deviation of the gaussian filter
     :type sigma: float
 
-    :param low: Low threshold for the hysteresis
-    :type low: float
-
-    :param high: High threshold for the hysteresis
-    :type high: float
+    :param low_high: Array with the low and high threshold for the hysteresis. If auto_threshold is True this array will be used as the proportion of the lowest and highest gradient values to be used as the low and high threshold.
+    :type low_high: np.array with shape (2,) with dtype = np.float32
 
     :param auto_threshold: Use automatic thresholding
     :type auto_threshold: bool
@@ -605,25 +775,32 @@ def canny_edge_detection(
 
     # Check if the image buffer needs to be copied to the device
     input_on_device = is_cuda_array(image_u8_i)
-    if not input_on_device:
-        image_u8_i = cuda.to_device(image_u8_i, stream=stream)
+    d_image_u8_i = (
+        image_u8_i if input_on_device else cuda.to_device(image_u8_i, stream=stream)
+    )
 
     # Convert input image to floating
-    d_gradients = cuda.device_array((height, width), dtype=np.float32, stream=stream)
+    # Allocate a new array to store the floating image
+    d_image_i = cuda.device_array((height, width), dtype=np.float32, stream=stream)
     _kernel_convert_to_float32[blockspergrid, (TPB, TPB), stream](
-        image_u8_i, d_gradients
+        d_image_u8_i, d_image_i
     )
 
     # Allocate output arrays
-    d_orientations = cuda.device_array((height, width), dtype=np.float32, stream=stream)
+    d_blurred = cuda.device_array((height, width), dtype=np.float32, stream=stream)
 
     # Apply Gaussian filter
     # We store the blurred image in the gradients array
-    _kernel_gauss[blockspergrid, (TPB, TPB), stream](d_gradients, sigma)
+    _kernel_gauss[blockspergrid, (TPB, TPB), stream](d_image_i, d_blurred, sigma)
 
-    # Compute gradient
+    # Allocate output arrays
+    d_gradients = d_image_i  # Reuse the image buffer for the gradients
+    d_image_i = None
+    d_orientations = cuda.device_array((height, width), dtype=np.float32, stream=stream)
+
+    # Compute the sobel gradient
     _kernel_gradient_sobel[blockspergrid, (TPB, TPB), stream](
-        d_gradients, d_orientations
+        d_blurred, d_gradients, d_orientations
     )
 
     # Apply Non-Maxima Suppression

@@ -101,9 +101,9 @@ def _prepare_image_buf(
     height, width = image_buf_o.shape[:2]
     if longest_side is not None and (height > longest_side or width > longest_side):
         scale = longest_side / max(height, width)
-        print(
-            f"Downscaling image from {height}x{width} to {int(height*scale)}x{int(width*scale)}"
-        )
+        # print(
+        #    f"Downscaling image from {height}x{width} to {int(height*scale)}x{int(width*scale)}"
+        # )
         image_buf_o = cv2.resize(
             image_buf_o,
             (int(width * scale), int(height * scale)),
@@ -116,9 +116,9 @@ def _prepare_image_buf(
         and (height < longest_side or width < longest_side)
     ):
         scale = longest_side / max(height, width)
-        print(
-            f"Upscaling image from {height}x{width} to {int(height*scale)}x{int(width*scale)}"
-        )
+        # print(
+        #    f"Upscaling image from {height}x{width} to {int(height*scale)}x{int(width*scale)}"
+        # )
         image_buf_o = cv2.resize(
             image_buf_o,
             (int(width * scale), int(height * scale)),
