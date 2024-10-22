@@ -1,0 +1,32 @@
+name: machine-vision-algos
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - matplotlib
+  - scikit-learn
+  - opencv
+
+  - jupyter # for notebooks
+  - ipywidgets # for interactive widgets
+  - ipympl # for interactive plots
+
+  - icecream # for debugging
+  - colorama # for debugging
+  - pandas # for data analysis
+  - snakeviz # for profiling
+  - numba # for speedup
+  - scipy # for scientific computing
+  - llvm-openmp # for parallelism support (works for both Intel/AMD)
+
+  - intel-cmplr-lib-rt # (optional) for speedup (numba) intel only
+  - tbb # (optional) for speedup (numba) intel only
+
+  - cuda-nvcc # required for running cuda code
+  - cuda-nvrtc # required for running cuda code
+  - "cuda-version>=12.0" # required for running cuda code
+  - cuda-python # required for running cuda code (numba)
+  - pip:
+      - open3d

@@ -1,0 +1,9 @@
+{
+  "github.copilot.enable": {
+    "*": true,
+    "python": true,
+  },
+  "python.analysis.extraPaths": [
+    "python/utils"
+  ],
+}
