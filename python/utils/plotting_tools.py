@@ -166,7 +166,7 @@ def plot_matrix(ax, mat, text=True, title=None, fontsize=6):
     if np.issubdtype(mat.dtype, np.floating):
         mat = np.round(mat, 1)
     height, width = mat.shape
-    if height <= 64 and width <= 64 and text:
+    if height <= 48 and width <= 48 and text:
         for i in range(height):
             for j in range(width):
                 c = mat[j, i]

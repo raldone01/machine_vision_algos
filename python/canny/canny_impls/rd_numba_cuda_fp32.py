@@ -36,10 +36,10 @@ def _kernel_convert_to_float32(input_i: np.array, output_o: np.array):
         output_o[x, y] = input_i[x, y] / 255.0
 
 
-@cuda.jit(fastmath=True, func_or_sig=void(float32[:, :], float32), device=True)
-def _dev_gauss_inplace(image_io: np.array, sigma: float):
-    # g = cuda.cg.this_grid()
-
+@cuda.jit(
+    fastmath=True, func_or_sig=void(float32[:, :], float32[:, :], float32), device=True
+)
+def _dev_gauss(image_i: np.array, image_o: np.array, sigma: float):
     x_thread, y_thread = cuda.threadIdx.x, cuda.threadIdx.y
 
     # compute the kernel radius
@@ -51,35 +51,25 @@ def _dev_gauss_inplace(image_io: np.array, sigma: float):
     # kernel = cuda.shared.array(shape=(kernel_width, kernel_width), dtype=np.float32)
     kernel = cuda.shared.array((100, 100), dtype=nb.types.float32)
 
-    # if x == 0 and y == 0:
-    #    print("kernel_width", kernel_width)
-
-    # Ensure to only allocate and compute kernel if within bounds
     factor = 2.0 * math.pi * (sigma**2.0)
-    # factor = 1.0
-    if x_thread < kernel_width and y_thread < kernel_width:
-        x_k = x_thread - one_dir
-        y_k = y_thread - one_dir
-        kernel_val = (math.exp(-(x_k**2.0 + y_k**2.0) / (2.0 * (sigma**2.0)))) / factor
-        kernel[x_thread, y_thread] = kernel_val
-        # kernel[x_thread, y_thread] = 0.0
-
-    # kernel[int(one_dir), int(one_dir)] = 0.1
-
-    # kernel[int(one_dir) - 1, int(one_dir)] = 1.0 # take value above: shift down
-    # kernel[int(one_dir) + 1, int(one_dir)] = 1.0  # take value below: shift up
-    # kernel[int(one_dir), int(one_dir) - 1] = 1.0  # take value left: shift right
-    # kernel[int(one_dir), int(one_dir) + 1] = 1.0  # take value right: shift left
-    # kernel[int(one_dir) + 2, int(one_dir) + 2] = (
-    #    1.0  # take value below right: shift up left
-    # )
+    # Loop over the kernel elements in chunks that fit in shared memory
+    for i in range(x_thread, kernel_width, cuda.blockDim.x):
+        for j in range(y_thread, kernel_width, cuda.blockDim.y):
+            # Ensure we only compute values within bounds
+            if i < kernel_width and j < kernel_width:
+                x_k = i - one_dir
+                y_k = j - one_dir
+                kernel_val = (
+                    math.exp(-(x_k**2.0 + y_k**2.0) / (2.0 * (sigma**2.0)))
+                ) / factor
+                kernel[i, j] = kernel_val
 
     cuda.syncthreads()
 
     x, y = cuda.grid(2)
 
     # Perform convolution: Only execute if within image bounds
-    x_width, y_height = image_io.shape
+    x_width, y_height = image_i.shape
     if not (x < x_width and y < y_height):
         return
 
@@ -99,26 +89,25 @@ def _dev_gauss_inplace(image_io: np.array, sigma: float):
                 y_j = 0
             if y_j >= y_height:
                 y_j = y_height - 1
-            image_value = image_io[x_i, y_j]
-            kernel_val = kernel[i + one_dir, j + one_dir] * image_value
+            kernel_val = kernel[i + one_dir, j + one_dir] * image_i[x_i, y_j]
             result += kernel_val
 
-    # g.sync()
-
     # Write back the result to the image
-    image_io[x, y] = result
+    # image_o[x, y] = result
 
     plot_kernel = False
     if plot_kernel:
+        image_o[x, y] = result
         if x < kernel_width and y < kernel_width:
-            image_io[x, y] = kernel[x, y]  # * factor
-        return
+            image_o[x, y] = kernel[x, y] * factor
+    else:
+        image_o[x, y] = result
 
 
 # TODO: check if its faster to use a two arrays instead of the io parameter
-@cuda.jit(fastmath=True, func_or_sig=void(float32[:, :], float32))
-def _kernel_gauss_inplace(image_io: np.array, sigma: float):
-    _dev_gauss_inplace(image_io, sigma)
+@cuda.jit(fastmath=True, func_or_sig=void(float32[:, :], float32[:, :], float32))
+def _kernel_gauss(image_i: np.array, image_o: np.array, sigma: float):
+    _dev_gauss(image_i, image_o, sigma)
 
 
 def blur_gauss(image_u8_i: np.array, sigma: float) -> np.array:
@@ -151,13 +140,14 @@ def blur_gauss(image_u8_i: np.array, sigma: float) -> np.array:
         image_u8_i = cuda.to_device(image_u8_i, stream=stream)
 
     # Convert input image to floating
-    d_image = cuda.device_array((height, width), dtype=np.float32, stream=stream)
-    _kernel_convert_to_float32[blockspergrid, (TPB, TPB), stream](image_u8_i, d_image)
+    d_image_i = cuda.device_array((height, width), dtype=np.float32, stream=stream)
+    _kernel_convert_to_float32[blockspergrid, (TPB, TPB), stream](image_u8_i, d_image_i)
 
+    d_image_o = cuda.device_array((height, width), dtype=np.float32, stream=stream)
     # Apply Gaussian filter
-    _kernel_gauss_inplace[blockspergrid, (TPB, TPB), stream](d_image, sigma)
+    _kernel_gauss[blockspergrid, (TPB, TPB), stream](d_image_i, d_image_o, sigma)
 
-    blurred = d_image if input_on_device else d_image.copy_to_host(stream=stream)
+    blurred = d_image_o if input_on_device else d_image_o.copy_to_host(stream=stream)
 
     # Reset warnings
     nb.config.CUDA_LOW_OCCUPANCY_WARNINGS = old_cuda_low_occupancy_warnings
@@ -605,7 +595,7 @@ def canny_edge_detection(
 
     # Apply Gaussian filter
     # We store the blurred image in the gradients array
-    _kernel_gauss_inplace[blockspergrid, (TPB, TPB), stream](d_gradients, sigma)
+    _kernel_gauss[blockspergrid, (TPB, TPB), stream](d_gradients, sigma)
 
     # Compute gradient
     _kernel_gradient_sobel[blockspergrid, (TPB, TPB), stream](
