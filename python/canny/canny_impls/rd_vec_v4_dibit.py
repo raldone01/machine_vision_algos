@@ -6,6 +6,7 @@ import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 import scipy.signal as signal
 from utils.attr_dict import AttrDict
+from icecream import ic
 
 
 def _convert_to_float(image_u8_i: np.array) -> np.array:
@@ -17,7 +18,8 @@ def _convert_to_float(image_u8_i: np.array) -> np.array:
 def _blur_gauss(image_i: np.array, sigma: float) -> np.array:
     one_dir = np.ceil(3 * sigma)
     # kernel_width = 2 * one_dir + 1
-    idx = np.arange(-one_dir, one_dir)
+    idx = np.arange(-one_dir, one_dir + 1)
+
     X, Y = np.meshgrid(idx, idx)
     kernel = 1 / (2 * np.pi * (sigma**2)) * (np.exp(-(X**2 + Y**2) / (2 * (sigma**2))))
 

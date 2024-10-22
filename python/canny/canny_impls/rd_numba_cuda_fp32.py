@@ -38,41 +38,81 @@ def _kernel_convert_to_float32(input_i: np.array, output_o: np.array):
 
 @cuda.jit(fastmath=True, func_or_sig=void(float32[:, :], float32), device=True)
 def _dev_gauss_inplace(image_io: np.array, sigma: float):
-    x, y = cuda.grid(2)
+    # g = cuda.cg.this_grid()
 
-    # compute the kernel and store it in the shared memory
-    kernel_width = int(2.0 * math.ceil(3.0 * sigma) + 1.0)
+    x_thread, y_thread = cuda.threadIdx.x, cuda.threadIdx.y
+
+    # compute the kernel radius
+    one_dir = math.ceil(3.0 * sigma)
+    kernel_width = int(2.0 * one_dir + 1.0)
     # TODO: The kernel should fit into a local array.
     # TODO: Check if it is faster if each thread computes the kernel on its own.
     # TODO: Check if its faster if the kernel is stored in constant memory or passed as an argument.
     # kernel = cuda.shared.array(shape=(kernel_width, kernel_width), dtype=np.float32)
     kernel = cuda.shared.array((100, 100), dtype=nb.types.float32)
+
     # if x == 0 and y == 0:
     #    print("kernel_width", kernel_width)
-    if x < kernel_width and y < kernel_width:
-        kernel_val = (
-            1.0
-            / (2.0 * np.pi * (sigma**2.0))
-            * (math.exp(-(x**2.0 + y**2.0) / (2.0 * (sigma**2.0))))
-        )
-        kernel[x, y] = kernel_val
+
+    # Ensure to only allocate and compute kernel if within bounds
+    factor = 2.0 * math.pi * (sigma**2.0)
+    # factor = 1.0
+    if x_thread < kernel_width and y_thread < kernel_width:
+        x_k = x_thread - one_dir
+        y_k = y_thread - one_dir
+        kernel_val = (math.exp(-(x_k**2.0 + y_k**2.0) / (2.0 * (sigma**2.0)))) / factor
+        kernel[x_thread, y_thread] = kernel_val
+        # kernel[x_thread, y_thread] = 0.0
+
+    # kernel[int(one_dir), int(one_dir)] = 0.1
+
+    # kernel[int(one_dir) - 1, int(one_dir)] = 1.0 # take value above: shift down
+    # kernel[int(one_dir) + 1, int(one_dir)] = 1.0  # take value below: shift up
+    # kernel[int(one_dir), int(one_dir) - 1] = 1.0  # take value left: shift right
+    # kernel[int(one_dir), int(one_dir) + 1] = 1.0  # take value right: shift left
+    # kernel[int(one_dir) + 2, int(one_dir) + 2] = (
+    #    1.0  # take value below right: shift up left
+    # )
+
     cuda.syncthreads()
 
-    x_width, y_height = image_io.shape[0], image_io.shape[1]
-    one_dir = int(math.ceil(3.0 * sigma))
+    x, y = cuda.grid(2)
 
-    if x < x_width and y < y_height:
-        # compute the convolution
-        result = 0.0
-        for i in range(-one_dir, one_dir):
-            for j in range(-one_dir, one_dir):
-                x_i = x + i
-                y_j = y + j
-                if x_i >= 0 and x_i < x_width and y_j >= 0 and y_j < y_height:
-                    kernel_val = kernel[i + one_dir, j + one_dir] * image_io[x_i, y_j]
-                    result += kernel_val
-        cuda.syncthreads()
-        image_io[x, y] = result
+    # Perform convolution: Only execute if within image bounds
+    x_width, y_height = image_io.shape
+    if not (x < x_width and y < y_height):
+        return
+
+    one_dir = int(one_dir)
+
+    result = 0.0
+    # Now properly apply the kernel across relevant neighbors
+    for i in range(-one_dir, one_dir + 1):
+        for j in range(-one_dir, one_dir + 1):
+            x_i = x + i
+            y_j = y + j
+            if x_i < 0:
+                x_i = 0
+            if x_i >= x_width:
+                x_i = x_width - 1
+            if y_j < 0:
+                y_j = 0
+            if y_j >= y_height:
+                y_j = y_height - 1
+            image_value = image_io[x_i, y_j]
+            kernel_val = kernel[i + one_dir, j + one_dir] * image_value
+            result += kernel_val
+
+    # g.sync()
+
+    # Write back the result to the image
+    image_io[x, y] = result
+
+    plot_kernel = False
+    if plot_kernel:
+        if x < kernel_width and y < kernel_width:
+            image_io[x, y] = kernel[x, y]  # * factor
+        return
 
 
 # TODO: check if its faster to use a two arrays instead of the io parameter
@@ -132,45 +172,44 @@ def blur_gauss(image_u8_i: np.array, sigma: float) -> np.array:
 def _dev_gradient_sobel(gradients_io: np.array, orientations_o: np.array):
     x, y = cuda.grid(2)
 
-    x_width, y_height = (
-        gradients_io.shape[0],
-        gradients_io.shape[1],
-    )
+    x_width, y_height = gradients_io.shape
 
-    if x < x_width and y < y_height:
-        # Compute the gradient
-        dx = 0.0
+    if not (x < x_width and y < y_height):
+        return
 
-        x_left_idx = x - 1
-        x_left = 0.0
-        if x_left_idx >= 0:
-            x_left = gradients_io[x_left_idx, y]
+    # Compute the gradient
+    dx = 0.0
 
-        x_right_idx = x + 1
-        x_right = 0.0
-        if x_right_idx < x_width:
-            x_right = gradients_io[x_right_idx, y]
+    x_left_idx = x - 1
+    x_left = 0.0
+    if x_left_idx >= 0:
+        x_left = gradients_io[x_left_idx, y]
 
-        dx = x_right - 2.0 * gradients_io[x, y] + x_left
+    x_right_idx = x + 1
+    x_right = 0.0
+    if x_right_idx < x_width:
+        x_right = gradients_io[x_right_idx, y]
 
-        dy = 0.0
+    dx = x_right - 2.0 * gradients_io[x, y] + x_left
 
-        y_top_idx = y - 1
-        y_top = 0.0
-        if y_top_idx >= 0:
-            y_top = gradients_io[x, y_top_idx]
+    dy = 0.0
 
-        y_bottom_idx = y + 1
-        y_bottom = 0.0
-        if y_bottom_idx < y_height:
-            y_bottom = gradients_io[x, y_bottom_idx]
+    y_top_idx = y - 1
+    y_top = 0.0
+    if y_top_idx >= 0:
+        y_top = gradients_io[x, y_top_idx]
 
-        dy = y_bottom - 2.0 * gradients_io[x, y] + y_top
+    y_bottom_idx = y + 1
+    y_bottom = 0.0
+    if y_bottom_idx < y_height:
+        y_bottom = gradients_io[x, y_bottom_idx]
 
-        orientations_o[x, y] = np.arctan2(dy, dx)
+    dy = y_bottom - 2.0 * gradients_io[x, y] + y_top
 
-        cuda.syncthreads()
-        gradients_io[x, y] = math.sqrt(dx**2 + dy**2)
+    orientations_o[x, y] = np.arctan2(dy, dx)
+
+    cuda.syncthreads()
+    gradients_io[x, y] = math.sqrt(dx**2 + dy**2)
 
 
 @cuda.jit(fastmath=True, func_or_sig=void(float32[:, :], float32[:, :]))
@@ -244,7 +283,7 @@ def sobel_gradients(image_i: np.array) -> tuple[np.array, np.array]:
 @cuda.jit(fastmath=True, device=True, func_or_sig=void(float32[:, :], float32[:, :]))
 def _dev_non_max(gradients_io, orientations_o):
     x, y = cuda.grid(2)
-    x_width, y_height = gradients_io.shape[0], gradients_io.shape[1]
+    x_width, y_height = gradients_io.shape
 
     if x >= x_width or y >= y_height:
         return
@@ -403,7 +442,7 @@ def _dev_compute_hysteresis_auto_thresholds(
     gradients_i: np.array, low_high_thresholds_io: np.array
 ) -> tuple[float, float]:
     x, y = cuda.grid(2)
-    x_width, y_height = gradients_i.shape[0], gradients_i.shape[1]
+    x_width, y_height = gradients_i.shape
 
     if x >= x_width or y >= y_height:
         return
@@ -467,7 +506,7 @@ def _dev_hysteresis(gradients_io, low_threshold, high_threshold):
     """
 
     x, y = cuda.grid(2)
-    x_width, y_height = gradients_io.shape[0], gradients_io.shape[1]
+    x_width, y_height = gradients_io.shape
 
     if x >= x_width or y >= y_height:
         return

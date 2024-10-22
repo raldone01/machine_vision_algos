@@ -140,11 +140,14 @@ def to_ipy_image(image_buf_i, fmt="png", longest_side=None, use_widget=True):
         return Image(data=f.getvalue())
 
 
-def plot_kernel(kernel, ax):
+def plot_kernel(ax, kernel, title=None):
     """
     Plot a 2D kernel as a 3D surface.
     Requires an axis with projection="3d".
     """
+    if title:
+        ax.set_title(title)
+
     kernel_width = kernel.shape[0]
     xi = np.arange(kernel_width)
     x, y = np.meshgrid(xi, xi)
