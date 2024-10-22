@@ -252,8 +252,8 @@ def _compute_hysteresis_auto_thresholds(
     )
 
     # +1 because we skip the first bucket
-    low = float(low_threshold_idx + 1)  # / HISTOGRAM_BIN_COUNT
-    high = float(high_threshold_idx + 1)  # / HISTOGRAM_BIN_COUNT
+    low = float(low_threshold_idx + 1) / HISTOGRAM_BIN_COUNT
+    high = float(high_threshold_idx + 1) / HISTOGRAM_BIN_COUNT
 
     return low, high
 

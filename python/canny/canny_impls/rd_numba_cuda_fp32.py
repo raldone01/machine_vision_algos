@@ -455,6 +455,7 @@ def non_max(gradients_i: np.array, orientations_i: np.array) -> np.array:
 
 
 HISTOGRAM_BIN_COUNT = 256
+HISTOGRAM_BIN_COUNT_PLUS_ONE = HISTOGRAM_BIN_COUNT + 1
 
 
 # https://developer.nvidia.com/blog/gpu-pro-tip-fast-histograms-using-shared-atomics-maxwell/
@@ -481,10 +482,12 @@ def _kernel_compute_edge_histogram_partial(
     # linear block index within 2D grid
     g = cuda.blockIdx.x + cuda.blockIdx.y * cuda.gridDim.x
 
-    # Initialize shared memory
-    shared = cuda.shared.array(shape=HISTOGRAM_BIN_COUNT, dtype=nb.types.uint32)
+    # Initialize shared memory (also the one at the end that is used to store the final histogram)
+    shared = cuda.shared.array(
+        shape=HISTOGRAM_BIN_COUNT_PLUS_ONE, dtype=nb.types.uint32
+    )
     # Initialize the histogram bins to zero
-    for i in range(linear_tid, HISTOGRAM_BIN_COUNT, BLOCK_THREADS):
+    for i in range(linear_tid, HISTOGRAM_BIN_COUNT_PLUS_ONE, BLOCK_THREADS):
         shared[i] = 0
     cuda.syncthreads()
 
@@ -525,24 +528,23 @@ def _kernel_compute_edge_histogram_final_accum(
 
     x_partial_histogram_count = partial_histograms_i.shape[0] // HISTOGRAM_BIN_COUNT
 
-    # if x == 0:
-    #    print("x_partial_histogram_count", x_partial_histogram_count)
-
     # NOTE: These are essentially HISTOGRAM_BIN_COUNT parallel cumulative sums
     # https://people.cs.vt.edu/yongcao/teaching/cs5234/spring2013/slides/Lecture10.pdf
     # https://en.wikipedia.org/wiki/Prefix_sum
     # https://developer.nvidia.com/gpugems/gpugems3/part-vi-gpu-computing/chapter-39-parallel-prefix-sum-scan-cuda
 
     # Sum all the partial histograms
-    histogram_non_cumulative = cuda.shared.array(
-        shape=HISTOGRAM_BIN_COUNT, dtype=nb.types.uint32
-    )
+    final_histogram_offset = HISTOGRAM_BIN_COUNT * x_partial_histogram_count
     if x < HISTOGRAM_BIN_COUNT:
         total = 0
         for i in range(x_partial_histogram_count):
             total += partial_histograms_i[x + i * HISTOGRAM_BIN_COUNT]
-        histogram_non_cumulative[x] = total
-        # print("X", x, "total", total)
+        partial_histograms_i[final_histogram_offset + x] = total
+
+    # All threads return early except the first block
+    if cuda.blockIdx.x != 0:
+        return
+
     cuda.syncthreads()
 
     # Calculate the final cumulative histogram
@@ -553,9 +555,8 @@ def _kernel_compute_edge_histogram_final_accum(
         total = 0
         # The first bucket is empty anyway
         for i in range(1, x + 1):
-            total += histogram_non_cumulative[i]
+            total += partial_histograms_i[final_histogram_offset + i]
         histogram_cumulative[x] = total
-        # print("C", x, "total", total)
 
     cuda.syncthreads()
 
@@ -564,16 +565,6 @@ def _kernel_compute_edge_histogram_final_accum(
     total_pixels = histogram_cumulative[HISTOGRAM_BIN_COUNT - 1]
     low_pixels = total_pixels * (1.0 - low_prop)
     high_pixels = total_pixels * (1.0 - high_prop)
-
-    if x == 0:
-        print(
-            "total_pixels",
-            total_pixels,
-            "low_pixels",
-            low_pixels,
-            "high_pixels",
-            high_pixels,
-        )
 
     # Every thread looks at his own bucket and the next one to decide if it is the low or high threshold
     if x < HISTOGRAM_BIN_COUNT:
@@ -586,10 +577,8 @@ def _kernel_compute_edge_histogram_final_accum(
                 next_bucket = histogram_cumulative[next_bucket_idx]
             else:
                 next_bucket = 0xFFFFFFFF
-            print("LC", x, bucket, next_bucket)
             if next_bucket >= low_pixels:
-                print("L", x, next_bucket)
-                low_high_thresholds_o[0] = x  # / HISTOGRAM_BIN_COUNT
+                low_high_thresholds_o[0] = x + 1 / HISTOGRAM_BIN_COUNT
         if bucket <= high_pixels:
             # We might have found the high threshold.
             # Check if the next bucket is above the high threshold.
@@ -598,10 +587,8 @@ def _kernel_compute_edge_histogram_final_accum(
                 next_bucket = histogram_cumulative[next_bucket_idx]
             else:
                 next_bucket = 0xFFFFFFFF
-            print("HC", x, bucket, next_bucket)
             if next_bucket >= high_pixels:
-                print("H", x, next_bucket)
-                low_high_thresholds_o[1] = x  # / HISTOGRAM_BIN_COUNT
+                low_high_thresholds_o[1] = x + 1 / HISTOGRAM_BIN_COUNT
 
 
 def compute_hysteresis_auto_thresholds(
@@ -648,10 +635,11 @@ def compute_hysteresis_auto_thresholds(
     d_low_high_thresholds_o = cuda.device_array(2, dtype=np.float32, stream=stream)
     histogram_count = blockspergrid_x * blockspergrid_y
 
-    ic(histogram_count)
+    # ic(histogram_count)
 
     d_partial_histograms = cuda.device_array(
-        histogram_count * HISTOGRAM_BIN_COUNT,
+        # The one at the end is used to store the final histogram
+        histogram_count * HISTOGRAM_BIN_COUNT + 1,
         dtype=np.uint32,
         stream=stream,
     )
@@ -660,9 +648,12 @@ def compute_hysteresis_auto_thresholds(
     _kernel_compute_edge_histogram_partial[blockspergrid, (TPB, TPB), stream](
         d_gradients_i, d_partial_histograms
     )
-    _kernel_compute_edge_histogram_final_accum[
-        1, max(histogram_count, HISTOGRAM_BIN_COUNT), stream
-    ](d_partial_histograms, d_low_high_prop_i, d_low_high_thresholds_o)
+
+    TPB_FA = HISTOGRAM_BIN_COUNT
+    blockspergrid_x = math.ceil(histogram_count / TPB_FA)
+    _kernel_compute_edge_histogram_final_accum[blockspergrid_x, TPB_FA, stream](
+        d_partial_histograms, d_low_high_prop_i, d_low_high_thresholds_o
+    )
 
     low_high_thresholds_o = (
         d_low_high_thresholds_o
