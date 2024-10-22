@@ -64,6 +64,8 @@ def _dev_gauss(image_i: np.array, image_o: np.array, sigma: float):
                 ) / factor
                 kernel[i, j] = kernel_val
 
+    # TODO: cache the block of the image in shared memory
+
     cuda.syncthreads()
 
     x, y = cuda.grid(2)
@@ -136,14 +138,19 @@ def blur_gauss(image_u8_i: np.array, sigma: float) -> np.array:
 
     # Check if the image buffer needs to be copied to the device
     input_on_device = is_cuda_array(image_u8_i)
-    if not input_on_device:
-        image_u8_i = cuda.to_device(image_u8_i, stream=stream)
+    d_image_u8_i = (
+        image_u8_i if input_on_device else cuda.to_device(image_u8_i, stream=stream)
+    )
 
     # Convert input image to floating
-    d_image_i = cuda.device_array((height, width), dtype=np.float32, stream=stream)
-    _kernel_convert_to_float32[blockspergrid, (TPB, TPB), stream](image_u8_i, d_image_i)
+    # Allocate a new array to store the floating image
+    d_image_i = cuda.device_array(image_u8_i.shape, dtype=np.float32, stream=stream)
+    _kernel_convert_to_float32[blockspergrid, (TPB, TPB), stream](
+        d_image_u8_i, d_image_i
+    )
 
-    d_image_o = cuda.device_array((height, width), dtype=np.float32, stream=stream)
+    # Allocate output array
+    d_image_o = cuda.device_array(image_u8_i.shape, dtype=np.float32, stream=stream)
     # Apply Gaussian filter
     _kernel_gauss[blockspergrid, (TPB, TPB), stream](d_image_i, d_image_o, sigma)
 
@@ -157,54 +164,81 @@ def blur_gauss(image_u8_i: np.array, sigma: float) -> np.array:
     return blurred
 
 
-# TODO: check if its faster to use a three arrays instead of the io parameter
-@cuda.jit(fastmath=True, func_or_sig=void(float32[:, :], float32[:, :]), device=True)
-def _dev_gradient_sobel(gradients_io: np.array, orientations_o: np.array):
+@cuda.jit(
+    fastmath=True,
+    func_or_sig=void(float32[:, :], float32[:, :], float32[:, :]),
+    device=True,
+)
+def _dev_gradient_sobel(
+    image_i: np.array, gradients_o: np.array, orientations_o: np.array
+):
+    # TODO: evaluate if the shared memory is faster (block cache)
     x, y = cuda.grid(2)
 
-    x_width, y_height = gradients_io.shape
+    x_width, y_height = image_i.shape
 
     if not (x < x_width and y < y_height):
         return
 
     # Compute the gradient
+
+    # Assume sym boundary conditions
+
+    # compute indices for the neighbours
+    x_top_idx = x - 1
+    if x_top_idx < 0:
+        x_top_idx = 0
+    y_left_idx = y - 1
+    if y_left_idx < 0:
+        y_left_idx = 0
+    y_right_idx = y + 1
+    if y_right_idx >= y_height:
+        y_right_idx = y_height - 1
+    x_bottom_idx = x + 1
+    if x_bottom_idx >= x_width:
+        x_bottom_idx = x_width - 1
+
+    # compute the dx values for the neighbours
     dx = 0.0
-
-    x_left_idx = x - 1
-    x_left = 0.0
-    if x_left_idx >= 0:
-        x_left = gradients_io[x_left_idx, y]
-
-    x_right_idx = x + 1
-    x_right = 0.0
-    if x_right_idx < x_width:
-        x_right = gradients_io[x_right_idx, y]
-
-    dx = x_right - 2.0 * gradients_io[x, y] + x_left
-
+    # top left
+    dx -= image_i[x_top_idx, y_left_idx]
+    # top right
+    dx += image_i[x_top_idx, y_right_idx]
+    # left
+    dx += -2.0 * image_i[x, y_left_idx]
+    # right
+    dx += 2.0 * image_i[x, y_right_idx]
+    # bottom left
+    dx -= image_i[x_bottom_idx, y_left_idx]
+    # bottom right
+    dx += image_i[x_bottom_idx, y_right_idx]
+    # compute the dy values for the neighbours
     dy = 0.0
+    # top left
+    dy += -image_i[x_top_idx, y_left_idx]
+    # top
+    dy += -2.0 * image_i[x_top_idx, y]
+    # top right
+    dy -= image_i[x_top_idx, y_right_idx]
+    # bottom left
+    dy += image_i[x_bottom_idx, y_left_idx]
+    # bottom
+    dy += 2.0 * image_i[x_bottom_idx, y]
+    # bottom right
+    dy += image_i[x_bottom_idx, y_right_idx]
 
-    y_top_idx = y - 1
-    y_top = 0.0
-    if y_top_idx >= 0:
-        y_top = gradients_io[x, y_top_idx]
-
-    y_bottom_idx = y + 1
-    y_bottom = 0.0
-    if y_bottom_idx < y_height:
-        y_bottom = gradients_io[x, y_bottom_idx]
-
-    dy = y_bottom - 2.0 * gradients_io[x, y] + y_top
-
-    orientations_o[x, y] = np.arctan2(dy, dx)
-
-    cuda.syncthreads()
-    gradients_io[x, y] = math.sqrt(dx**2 + dy**2)
+    orientations_o[x, y] = np.atan2(dy, dx)
+    gradient = math.sqrt(dx**2 + dy**2)
+    # clip the gradient to the range [0, 1]
+    # gradients_o[x, y] = np.clip(gradient, 0.0, 1.0) # scalars cause issues in numba
+    gradients_o[x, y] = min(1.0, max(0.0, gradient))
 
 
-@cuda.jit(fastmath=True, func_or_sig=void(float32[:, :], float32[:, :]))
-def _kernel_gradient_sobel(gradients_io: np.array, orientations_o: np.array):
-    _dev_gradient_sobel(gradients_io, orientations_o)
+@cuda.jit(fastmath=True, func_or_sig=void(float32[:, :], float32[:, :], float32[:, :]))
+def _kernel_gradient_sobel(
+    image_i: np.array, gradients_o: np.array, orientations_o: np.array
+):
+    _dev_gradient_sobel(image_i, gradients_o, orientations_o)
 
 
 def sobel_gradients(image_i: np.array) -> tuple[np.array, np.array]:
@@ -232,33 +266,23 @@ def sobel_gradients(image_i: np.array) -> tuple[np.array, np.array]:
 
     # Check if the image buffer needs to be copied to the device
     input_on_device = is_cuda_array(image_i)
-    if not input_on_device:
-        d_gradients_io = cuda.to_device(image_i, stream=stream)
-    else:
-        # Allocate a new array to store the gradients
-        d_gradients_io = cuda.device_array(
-            (height, width), dtype=np.float32, stream=stream
-        )
-        # Copy the input image to the new array
-        _kernel_copy_devarray2d[blockspergrid, (TPB, TPB), stream](
-            image_i, d_gradients_io
-        )
+    d_image_i = image_i if input_on_device else cuda.to_device(image_i, stream=stream)
 
-    d_orientations = cuda.device_array((height, width), dtype=np.float32, stream=stream)
+    # Allocate output arrays
+    d_gradients_o = cuda.device_array(image_i.shape, dtype=np.float32, stream=stream)
+    d_orientations_o = cuda.device_array(image_i.shape, dtype=np.float32, stream=stream)
 
     _kernel_gradient_sobel[blockspergrid, (TPB, TPB), stream](
-        d_gradients_io, d_orientations
+        d_image_i, d_gradients_o, d_orientations_o
     )
 
-    gradients = (
-        d_gradients_io
-        if input_on_device
-        else d_gradients_io.copy_to_host(stream=stream)
+    gradients_o = (
+        d_gradients_o if input_on_device else d_gradients_o.copy_to_host(stream=stream)
     )
-    orientations = (
-        d_orientations
+    orientations_o = (
+        d_orientations_o
         if input_on_device
-        else d_orientations.copy_to_host(stream=stream)
+        else d_orientations_o.copy_to_host(stream=stream)
     )
 
     # Reset warnings
@@ -266,7 +290,7 @@ def sobel_gradients(image_i: np.array) -> tuple[np.array, np.array]:
 
     stream.synchronize()
 
-    return gradients, orientations
+    return gradients_o, orientations_o
 
 
 # TODO: check if its faster to use a three arrays instead of the io parameter

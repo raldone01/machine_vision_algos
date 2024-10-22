@@ -80,7 +80,9 @@ def print_open_plot_count():
     print(f"There are {open_plots_count} open plots.")
 
 
-def _prepare_image_buf(image_buf_i: np.array, longest_side: int = None):
+def _prepare_image_buf(
+    image_buf_i: np.array, longest_side: int = None, upscale: bool = False
+):
     if len(image_buf_i.shape) == 3:
         is_color = True
     elif len(image_buf_i.shape) == 2:
@@ -95,14 +97,32 @@ def _prepare_image_buf(image_buf_i: np.array, longest_side: int = None):
     else:
         image_buf_o = image_buf_i.astype(np.float32)
 
+    # Downscale the image if it is too large
     height, width = image_buf_o.shape[:2]
     if longest_side is not None and (height > longest_side or width > longest_side):
         scale = longest_side / max(height, width)
-        cv2.resize(
+        print(
+            f"Downscaling image from {height}x{width} to {int(height*scale)}x{int(width*scale)}"
+        )
+        image_buf_o = cv2.resize(
             image_buf_o,
             (int(width * scale), int(height * scale)),
             interpolation=cv2.INTER_AREA,
-            dst=image_buf_o,
+        )
+
+    if (
+        upscale
+        and longest_side is not None
+        and (height < longest_side or width < longest_side)
+    ):
+        scale = longest_side / max(height, width)
+        print(
+            f"Upscaling image from {height}x{width} to {int(height*scale)}x{int(width*scale)}"
+        )
+        image_buf_o = cv2.resize(
+            image_buf_o,
+            (int(width * scale), int(height * scale)),
+            interpolation=cv2.INTER_NEAREST,
         )
 
     if is_color:
@@ -113,8 +133,8 @@ def _prepare_image_buf(image_buf_i: np.array, longest_side: int = None):
     return image_buf_o, is_color
 
 
-def plot_image(ax, image_buf_i, longest_side=None):
-    image_buf_o, is_color = _prepare_image_buf(image_buf_i, longest_side)
+def plot_image(ax, image_buf_i, longest_side=None, upscale: bool = False):
+    image_buf_o, is_color = _prepare_image_buf(image_buf_i, longest_side, upscale)
 
     if is_color:
         ax.imshow(image_buf_o)
@@ -124,8 +144,10 @@ def plot_image(ax, image_buf_i, longest_side=None):
     return ax, image_buf_o
 
 
-def to_ipy_image(image_buf_i, fmt="png", longest_side=None, use_widget=True):
-    image_buf_o, is_color = _prepare_image_buf(image_buf_i, longest_side)
+def to_ipy_image(
+    image_buf_i, fmt="png", longest_side=None, use_widget=True, upscale: bool = False
+):
+    image_buf_o, is_color = _prepare_image_buf(image_buf_i, longest_side, upscale)
 
     image_buf_o = (image_buf_o * 255).astype(np.uint8)
 

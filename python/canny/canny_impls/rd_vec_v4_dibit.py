@@ -66,13 +66,19 @@ def _sobel(image_i: np.array, prewitt: bool = False) -> tuple[np.array, np.array
     kernel_x = prewitt_x if prewitt else sobel_x
     kernel_y = prewitt_y if prewitt else sobel_y
 
-    img_x = signal.convolve2d(image_i, kernel_x, boundary="symm")
-    img_y = signal.convolve2d(image_i, kernel_y, boundary="symm")
+    # TODO: impl using only numpy
+    # TODO: speed compare cv2, scipy, numpy
+    # import cv2
+    # img_x = cv2.filter2D(src=image_i, ddepth=-1, kernel=kernel_x)
+    # img_y = cv2.filter2D(src=image_i, ddepth=-1, kernel=kernel_y)
 
-    gradient = np.clip(np.sqrt(img_x**2 + img_y**2), 0.0, 1.0)
-    orientation = np.atan2(img_y, img_x)
+    img_x = -signal.convolve2d(image_i, kernel_x, boundary="symm", mode="same")
+    img_y = -signal.convolve2d(image_i, kernel_y, boundary="symm", mode="same")
 
-    return gradient, orientation
+    gradient_o = np.clip(np.sqrt(img_x**2 + img_y**2), 0.0, 1.0)
+    orientation_o = np.atan2(img_y, img_x)
+
+    return gradient_o, orientation_o
 
 
 def sobel_gradients(image_i: np.array) -> tuple[np.array, np.array]:
