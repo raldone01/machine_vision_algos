@@ -36,7 +36,14 @@ def init_notebook() -> None:
 
     try:
         import matplotlib.pyplot as plt
+        import matplotlib
+
+        # https://matplotlib.org/stable/users/explain/figure/backends.html#interactive-backends
+        matplotlib.use("ipympl")
+        # matplotlib.use("TkAgg")
+        # matplotlib.use("QtAgg")
 
         plt.style.use("ggplot")
+        plt.style.use("fast")
     except ImportError:
         pass

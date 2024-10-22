@@ -46,14 +46,16 @@ def _dev_gauss_inplace(image_io: np.array, sigma: float):
     # TODO: Check if it is faster if each thread computes the kernel on its own.
     # TODO: Check if its faster if the kernel is stored in constant memory or passed as an argument.
     # kernel = cuda.shared.array(shape=(kernel_width, kernel_width), dtype=np.float32)
-    kernel = cuda.shared.array(0, dtype=nb.types.float32)
+    kernel = cuda.shared.array((100, 100), dtype=nb.types.float32)
+    # if x == 0 and y == 0:
+    #    print("kernel_width", kernel_width)
     if x < kernel_width and y < kernel_width:
         kernel_val = (
             1.0
             / (2.0 * np.pi * (sigma**2.0))
             * (math.exp(-(x**2.0 + y**2.0) / (2.0 * (sigma**2.0))))
         )
-        kernel[x + y * kernel_width] = kernel_val
+        kernel[x, y] = kernel_val
     cuda.syncthreads()
 
     x_width, y_height = image_io.shape[0], image_io.shape[1]
@@ -67,10 +69,7 @@ def _dev_gauss_inplace(image_io: np.array, sigma: float):
                 x_i = x + i
                 y_j = y + j
                 if x_i >= 0 and x_i < x_width and y_j >= 0 and y_j < y_height:
-                    kernel_val = (
-                        kernel[(i + one_dir) + (j + one_dir) * kernel_width]
-                        * image_io[x_i, y_j]
-                    )
+                    kernel_val = kernel[i + one_dir, j + one_dir] * image_io[x_i, y_j]
                     result += kernel_val
         cuda.syncthreads()
         image_io[x, y] = result

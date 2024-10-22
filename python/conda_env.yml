@@ -4,7 +4,7 @@ channels:
 dependencies:
   - python=3.11
   - pip
-  - numpy
+  - "numpy<=2.0" # Pinned because numba supports at most 2.0
   - matplotlib
   - scikit-learn
   - opencv
@@ -12,6 +12,7 @@ dependencies:
   - jupyter # for notebooks
   - ipywidgets # for interactive widgets
   - ipympl # for interactive plots
+  - pyqt # for interactive plots
 
   - icecream # for debugging
   - colorama # for debugging

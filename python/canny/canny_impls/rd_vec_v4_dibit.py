@@ -21,8 +21,9 @@ def _blur_gauss(image_i: np.array, sigma: float) -> np.array:
     X, Y = np.meshgrid(idx, idx)
     kernel = 1 / (2 * np.pi * (sigma**2)) * (np.exp(-(X**2 + Y**2) / (2 * (sigma**2))))
 
+    # TODO: write a numpy only convolution using sliding_window_view and using just indices
     img_blur = signal.convolve2d(image_i, kernel, mode="same", boundary="symm")
-    # TODO: compare with: img_blur = cv2.filter2D(src=img, ddepth=-1, kernel=kernel)
+    # TODO: compare with: img_blur = cv2.filter2D(src=image_i, ddepth=-1, kernel=kernel)
     return img_blur
 
 
