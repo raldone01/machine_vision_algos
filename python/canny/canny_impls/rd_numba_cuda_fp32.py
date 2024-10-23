@@ -702,8 +702,8 @@ def _kernel_hysteresis(
 
     low, high = low_high_thresholds_i[0], low_high_thresholds_i[1]
     # DEBUG
-    low = 0.75
-    high = 0.95
+    # low = 0.75
+    # high = 0.95
 
     # pixel coordinates
     x = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
@@ -829,43 +829,45 @@ def _kernel_hysteresis(
         is_discard_or_strong = True
 
     # 3) Expand the strong edges to the weak edges
-    found_new_edge_this_iteration = True
+    found_new_edge_this_iteration = 1
     found_new_edge = False
-    while cuda.syncthreads_or(int(found_new_edge_this_iteration)):
-        found_new_edge_this_iteration = False
-        if is_discard_or_strong:
-            continue
+    while found_new_edge_this_iteration:  # TODO: REPORT DEADLOCK IN CUDA TO NUMBA IF syncthreads_or IS USED HERE IN THE WHILE. CUDASIM IS WORKING
+        found_new_edge_this_iteration = 0
+        if not is_discard_or_strong:
+            lo_x = l_x + 1
+            lo_y = l_y + 1
 
-        lo_x = l_x + 1
-        lo_y = l_y + 1
+            # 3.1) Check if the weak edge has a strong edge neighbour
+            # top left
+            found_new_edge_this_iteration |= block_cache[lo_x - 1, lo_y - 1] == 1.0
+            # top
+            found_new_edge_this_iteration |= block_cache[lo_x, lo_y - 1] == 1.0
+            # top right
+            found_new_edge_this_iteration |= block_cache[lo_x + 1, lo_y - 1] == 1.0
+            # right
+            found_new_edge_this_iteration |= block_cache[lo_x + 1, lo_y] == 1.0
+            # bottom right
+            found_new_edge_this_iteration |= block_cache[lo_x + 1, lo_y + 1] == 1.0
+            # bottom
+            found_new_edge_this_iteration |= block_cache[lo_x, lo_y + 1] == 1.0
+            # bottom left
+            found_new_edge_this_iteration |= block_cache[lo_x - 1, lo_y + 1] == 1.0
+            # left
+            found_new_edge_this_iteration |= block_cache[lo_x - 1, lo_y] == 1.0
 
-        # 3.1) Check if the weak edge has a strong edge neighbour
-        # top left
-        found_new_edge_this_iteration |= block_cache[lo_x - 1, lo_y - 1] == 1.0
-        # top
-        found_new_edge_this_iteration |= block_cache[lo_x, lo_y - 1] == 1.0
-        # top right
-        found_new_edge_this_iteration |= block_cache[lo_x + 1, lo_y - 1] == 1.0
-        # right
-        found_new_edge_this_iteration |= block_cache[lo_x + 1, lo_y] == 1.0
-        # bottom right
-        found_new_edge_this_iteration |= block_cache[lo_x + 1, lo_y + 1] == 1.0
-        # bottom
-        found_new_edge_this_iteration |= block_cache[lo_x, lo_y + 1] == 1.0
-        # bottom left
-        found_new_edge_this_iteration |= block_cache[lo_x - 1, lo_y + 1] == 1.0
-        # left
-        found_new_edge_this_iteration |= block_cache[lo_x - 1, lo_y] == 1.0
+            if found_new_edge_this_iteration:
+                # print("FNE", x, y, gx, gy)
+                block_cache[lo_x, lo_y] = 1.0
+                is_discard_or_strong = True
+                found_new_edge = True
+        found_new_edge_this_iteration = cuda.syncthreads_or(
+            found_new_edge_this_iteration
+        )
 
-        if found_new_edge_this_iteration:
-            print("FNE", x, y, gx, gy)
-            block_cache[lo_x, lo_y] = 1.0
-            is_discard_or_strong = True
-            found_new_edge = True
     any_new_edge_found = cuda.syncthreads_or(int(found_new_edge))
 
     if l_x == 0 and l_y == 0:
-        print("ANE", any_new_edge_found, gx, gy)
+        # print("ANE", any_new_edge_found, gx, gy)
         if any_new_edge_found:
             cuda.atomic.add(blocks_that_found_a_new_edge_o, 0, 1)
 
@@ -1002,7 +1004,7 @@ def hysteresis(gradients_i: np.array, low_high_thresholds_i: np.array) -> np.arr
         any_new_edge_found = current_found_edge_counter - last_found_edge_counter > 0
         if any_new_edge_found:
             cuda.to_device(pixel_offset, to=d_pixel_offset, stream=stream)
-        ic(it, current_found_edge_counter, pixel_offset)
+        # ic(it, current_found_edge_counter, pixel_offset)
         # DEBUG
         # any_new_edge_found = False
 
