@@ -527,7 +527,9 @@ def _kernel_compute_edge_histogram_final_accum(
     if x < 2:
         low_high_thresholds_o[x] = 69.0
 
-    x_partial_histogram_count = partial_histograms_i.shape[0] // HISTOGRAM_BIN_COUNT
+    x_partial_histogram_count = (
+        partial_histograms_i.shape[0] // HISTOGRAM_BIN_COUNT
+    ) - 1
 
     # NOTE: These are essentially HISTOGRAM_BIN_COUNT parallel cumulative sums
     # https://people.cs.vt.edu/yongcao/teaching/cs5234/spring2013/slides/Lecture10.pdf
@@ -579,7 +581,7 @@ def _kernel_compute_edge_histogram_final_accum(
             else:
                 next_bucket = 0xFFFFFFFF
             if next_bucket >= low_pixels:
-                low_high_thresholds_o[0] = x + 1 / HISTOGRAM_BIN_COUNT
+                low_high_thresholds_o[0] = (x + 1) / HISTOGRAM_BIN_COUNT
         if bucket <= high_pixels:
             # We might have found the high threshold.
             # Check if the next bucket is above the high threshold.
@@ -589,7 +591,7 @@ def _kernel_compute_edge_histogram_final_accum(
             else:
                 next_bucket = 0xFFFFFFFF
             if next_bucket >= high_pixels:
-                low_high_thresholds_o[1] = x + 1 / HISTOGRAM_BIN_COUNT
+                low_high_thresholds_o[1] = (x + 1) / HISTOGRAM_BIN_COUNT
 
 
 def compute_hysteresis_auto_thresholds(
@@ -637,10 +639,11 @@ def compute_hysteresis_auto_thresholds(
     histogram_count = blockspergrid_x * blockspergrid_y
 
     # ic(histogram_count)
+    # The one at the end is used to store the final histogram
+    histogram_count += 1
 
     d_partial_histograms = cuda.device_array(
-        # The one at the end is used to store the final histogram
-        histogram_count * HISTOGRAM_BIN_COUNT + 1,
+        histogram_count * HISTOGRAM_BIN_COUNT,
         dtype=np.uint32,
         stream=stream,
     )
@@ -672,23 +675,21 @@ def compute_hysteresis_auto_thresholds(
 
 @cuda.jit(
     fastmath=True,
-    func_or_sig=void(
-        float32[:, :], float32[:], int32[:], float32[:, :], nb.types.bool[:]
-    ),
+    func_or_sig=void(float32[:, :], float32[:], int32[:], float32[:, :], int32[:]),
 )
 def _kernel_hysteresis(
     edges_i: np.array,
     low_high_thresholds_i: np.array,
     pixel_offset_i: np.array,
     edges_o: np.array,
-    something_changed_flag_o: np.array,
+    blocks_that_found_a_new_edge_o: np.array,
 ):
     """
     Apply hysteresis thresholding to the gradients array.
 
     1) DEV: Copy gradients for one block into shared memory (including one pixel border).
     2) DEV: Expand the strong edges to the weak edges.
-    3) DEV: Atomic flag signales that the block is done.
+    3) DEV: Atomic flag signals that the block is done.
     4) DEV: Copy the block back to global memory (excluding the border).
     5) DEV: Each block updates the change flag if it found new edges.
     6) HOST: If the change flag is set we need to iterate again with the pixel_offset=(-BLOCK/2, -BLOCK/2).
@@ -698,6 +699,11 @@ def _kernel_hysteresis(
     x_width, y_height = edges_i.shape
 
     x_offset, y_offset = pixel_offset_i[0], pixel_offset_i[1]
+
+    low, high = low_high_thresholds_i[0], low_high_thresholds_i[1]
+    # DEBUG
+    low = 0.75
+    high = 0.95
 
     # pixel coordinates
     x = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
@@ -737,7 +743,7 @@ def _kernel_hysteresis(
             block_cache[six, siy] = -0.6
     cuda.syncthreads()
 
-    # Copy from edges_i to shared memory
+    # 1) Copy from edges_i to shared memory
     edges_x = x - x_offset
     edges_y = y - y_offset
     if edges_x >= 0 and edges_x < x_width and edges_y >= 0 and edges_y < y_height:
@@ -808,20 +814,100 @@ def _kernel_hysteresis(
             block_cache[TPB + 1, TPB + 1] = 0.0
     cuda.syncthreads()
 
-    # START DEBUG SINGLE SHARED MEM BLOCK
-    if x < x_width or y < y_height:
-        edges_o[x, y] = -0.5
-    cuda.syncthreads()
+    # 2) Expand the strong edges to the weak edges
+    # Borders can be ignored because they are handled by other thread blocks
 
+    is_discard_or_strong = False
+    # 2.1) Snap all edges above the high threshold to 1.0
+    edge = block_cache[l_x + 1, l_y + 1]
+    if edge >= high:
+        block_cache[l_x + 1, l_y + 1] = 1.0
+        is_discard_or_strong = True
+    # 2.2) Discard all edges below the low threshold
+    elif edge < low:
+        block_cache[l_x + 1, l_y + 1] = 0.0
+        is_discard_or_strong = True
+
+    # 3) Expand the strong edges to the weak edges
+    found_new_edge_this_iteration = True
+    found_new_edge = False
+    while cuda.syncthreads_or(int(found_new_edge_this_iteration)):
+        found_new_edge_this_iteration = False
+        if is_discard_or_strong:
+            continue
+
+        lo_x = l_x + 1
+        lo_y = l_y + 1
+
+        # 3.1) Check if the weak edge has a strong edge neighbour
+        # top left
+        found_new_edge_this_iteration |= block_cache[lo_x - 1, lo_y - 1] == 1.0
+        # top
+        found_new_edge_this_iteration |= block_cache[lo_x, lo_y - 1] == 1.0
+        # top right
+        found_new_edge_this_iteration |= block_cache[lo_x + 1, lo_y - 1] == 1.0
+        # right
+        found_new_edge_this_iteration |= block_cache[lo_x + 1, lo_y] == 1.0
+        # bottom right
+        found_new_edge_this_iteration |= block_cache[lo_x + 1, lo_y + 1] == 1.0
+        # bottom
+        found_new_edge_this_iteration |= block_cache[lo_x, lo_y + 1] == 1.0
+        # bottom left
+        found_new_edge_this_iteration |= block_cache[lo_x - 1, lo_y + 1] == 1.0
+        # left
+        found_new_edge_this_iteration |= block_cache[lo_x - 1, lo_y] == 1.0
+
+        if found_new_edge_this_iteration:
+            print("FNE", x, y, gx, gy)
+            block_cache[lo_x, lo_y] = 1.0
+            is_discard_or_strong = True
+            found_new_edge = True
+    any_new_edge_found = cuda.syncthreads_or(int(found_new_edge))
+
+    if l_x == 0 and l_y == 0:
+        print("ANE", any_new_edge_found, gx, gy)
+        if any_new_edge_found:
+            cuda.atomic.add(blocks_that_found_a_new_edge_o, 0, 1)
+
+    # 4) Copy the block back to global memory
+    if edges_x >= 0 and edges_x < x_width and edges_y >= 0 and edges_y < y_height:
+        edges_o[edges_x, edges_y] = block_cache[l_x + 1, l_y + 1]
+
+    return
+    # START DEBUG SINGLE SHARED MEM BLOCK
     # copy the first block of shared memory to global memory
-    if cuda.blockIdx.x == 1 and cuda.blockIdx.y == 1:
+    cuda.syncthreads()
+    if cuda.blockIdx.x == 1 and cuda.blockIdx.y == 0 and l_x == 0 and l_y == 0:
+        for six in range(0, x_width):
+            for siy in range(0, y_height):
+                edges_o[six, siy] = -0.5
+
         for six in range(0, TPB_PLUS_TWO):
             for siy in range(0, TPB_PLUS_TWO):
                 edges_o[six, siy] = block_cache[six, siy]
     return
     # END DEBUG SINGLE SHARED MEM BLOCK
 
-    return
+
+@cuda.jit(
+    fastmath=True,
+    func_or_sig=void(float32[:, :], float32[:, :]),
+)
+def _kernel_hysteresis_final_filter(
+    edges_i: np.array,
+    edges_o: np.array,
+):
+    x, y = cuda.grid(2)
+    x_width, y_height = edges_i.shape
+
+    if x >= x_width or y >= y_height:
+        return
+
+    if edges_i[x, y] == 1.0:
+        val = 1.0
+    else:
+        val = 0.0
+    edges_o[x, y] = val
 
 
 def hysteresis(gradients_i: np.array, low_high_thresholds_i: np.array) -> np.array:
@@ -865,16 +951,65 @@ def hysteresis(gradients_i: np.array, low_high_thresholds_i: np.array) -> np.arr
 
     # Allocate arrays
     d_edges_o = cuda.device_array((height, width), dtype=np.float32, stream=stream)
-    d_pixel_offset_i = cuda.to_device(np.array([0, 0], dtype=np.int32), stream=stream)
-    d_something_changed_flag = cuda.device_array(1, dtype=np.bool_, stream=stream)
+
+    # DEBUG INIT OUTPUT
+    debug_d_edges_o = cuda.to_device(np.full_like(gradients_i, -1.1), stream=stream)
+    _kernel_copy_devarray2d[blockspergrid, (TPB, TPB), stream](
+        debug_d_edges_o,
+        d_edges_o,
+    )
+
+    d_blocks_that_found_a_new_edge = cuda.to_device(
+        np.array([0], dtype=np.int32), stream=stream
+    )
+
+    pixel_offset_shift = TPB // 2
+    pixel_offset = np.array([0, 0], dtype=np.int32)
+    # pixel_offset = np.array([5, 5], dtype=np.int32)
+    d_pixel_offset = cuda.to_device(pixel_offset, stream=stream)
 
     # Apply hysteresis thresholding
-    _kernel_hysteresis[blockspergrid, (TPB, TPB), stream](
+
+    last_found_edge_counter = 0
+    current_found_edge_counter = 0
+    any_new_edge_found = True
+    it = 0
+    while any_new_edge_found:
+        # +1 to accommodate the grid offset
+        blockspergrid = (blockspergrid_x + 1, blockspergrid_y + 1)
+        _kernel_hysteresis[blockspergrid, (TPB, TPB), stream](
+            d_gradients_i,
+            d_low_high_thresholds_i,
+            d_pixel_offset,
+            d_edges_o,
+            d_blocks_that_found_a_new_edge,
+        )
+        # swap d_gradients_i and d_edges_o
+        d_gradients_i, d_edges_o = d_edges_o, d_gradients_i
+
+        last_found_edge_counter = current_found_edge_counter
+        current_found_edge_counter = d_blocks_that_found_a_new_edge.copy_to_host(
+            stream=stream
+        )[0]
+        stream.synchronize()
+        it += 1
+        if it % 2 != 0:
+            pixel_offset[0] = pixel_offset_shift
+            pixel_offset[1] = pixel_offset_shift
+        else:
+            pixel_offset[0] = 0
+            pixel_offset[1] = 0
+        any_new_edge_found = current_found_edge_counter - last_found_edge_counter > 0
+        if any_new_edge_found:
+            cuda.to_device(pixel_offset, to=d_pixel_offset, stream=stream)
+        ic(it, current_found_edge_counter, pixel_offset)
+        # DEBUG
+        # any_new_edge_found = False
+
+    # Filter the final image
+    _kernel_hysteresis_final_filter[blockspergrid, (TPB, TPB), stream](
         d_gradients_i,
-        d_low_high_thresholds_i,
-        d_pixel_offset_i,
         d_edges_o,
-        d_something_changed_flag,
     )
 
     edges_o = (
