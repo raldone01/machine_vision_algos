@@ -9,10 +9,11 @@ import numba as nb
 from numba import cuda
 import math
 from utils.attr_dict import AttrDict
-from numba.types import void, float32, uint8, uint32
+from numba.types import void, float32, uint8, uint32, int32
 from icecream import ic
 
 TPB = 16
+TPB_PLUS_TWO = TPB + 2
 
 
 def is_cuda_array(obj):
@@ -669,62 +670,223 @@ def compute_hysteresis_auto_thresholds(
     return low_high_thresholds_o
 
 
-@cuda.jit(fastmath=True, device=True, func_or_sig=void(float32[:, :], float32, float32))
-def _dev_hysteresis(
-    gradients_io: np.array, low_threshold: np.array, high_threshold: np.array
+@cuda.jit(
+    fastmath=True,
+    func_or_sig=void(
+        float32[:, :], float32[:], int32[:], float32[:, :], nb.types.bool[:]
+    ),
+)
+def _kernel_hysteresis(
+    edges_i: np.array,
+    low_high_thresholds_i: np.array,
+    pixel_offset_i: np.array,
+    edges_o: np.array,
+    something_changed_flag_o: np.array,
 ):
     """
     Apply hysteresis thresholding to the gradients array.
-    We do ab breadth-first search to find connected edges.
-    All edges under the low threshold are discarded.
-    We mark all edges above the high threshold as edges.
-    Then we iterate and look at all neighbours of every pixel.
-    If we are below the low threshold we discard the pixel.
-    If we find a neighbour that is an edge we mark ourselves as an edge.
-    If an iteration does not find any new edges we are done.
+
+    1) DEV: Copy gradients for one block into shared memory (including one pixel border).
+    2) DEV: Expand the strong edges to the weak edges.
+    3) DEV: Atomic flag signales that the block is done.
+    4) DEV: Copy the block back to global memory (excluding the border).
+    5) DEV: Each block updates the change flag if it found new edges.
+    6) HOST: If the change flag is set we need to iterate again with the pixel_offset=(-BLOCK/2, -BLOCK/2).
+             One block more is required because of the offset grid!
     """
 
-    x, y = cuda.grid(2)
-    x_width, y_height = gradients_io.shape
+    x_width, y_height = edges_i.shape
 
-    if x >= x_width or y >= y_height:
-        return
+    x_offset, y_offset = pixel_offset_i[0], pixel_offset_i[1]
 
-    if gradients_io[x, y] > high_threshold:
-        # snap all pixels above the high threshold to 1.0 to mark them as edges
-        gradients_io[x, y] = 1.0
-        return
+    # pixel coordinates
+    x = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
+    y = cuda.blockIdx.y * cuda.blockDim.y + cuda.threadIdx.y
 
-    if gradients_io[x, y] < low_threshold:
-        # discard all pixels below the low threshold
-        gradients_io[x, y] = 0.0
-        return
+    # grid dimensions
+    nx = cuda.gridDim.x * cuda.blockDim.x
+    ny = cuda.gridDim.y * cuda.blockDim.y
 
-    new_edges_found = cuda.shared.array(1, np.bool)
-    new_edges_found[0] = False
+    # local block coordinates
+    l_x = cuda.threadIdx.x
+    l_y = cuda.threadIdx.y
 
-    while not new_edges_found[0]:
-        for i in range(-1, 2):
-            for j in range(-1, 2):
-                x_i = x + i
-                y_j = y + j
-                if x_i >= 0 and x_i < x_width and y_j >= 0 and y_j < y_height:
-                    if gradients_io[x_i, y_j] == 1.0:
-                        gradients_io[x, y] = 1.0
-                        new_edges_found[0] = True
-                        return
-        cuda.syncthreads()
+    # linear thread index within 2D block
+    linear_tid = cuda.threadIdx.x + cuda.threadIdx.y * cuda.blockDim.x
 
-    # Discard all pixels that were not marked as edges
-    if gradients_io[x, y] != 1.0:
-        gradients_io[x, y] = 0.0
+    # total number of threads in the 2D block
+    BLOCK_THREADS = cuda.blockDim.x * cuda.blockDim.y
+
+    # linear block index within 2D grid
+    g = cuda.blockIdx.x + cuda.blockIdx.y * cuda.gridDim.x
+    g_x_width = cuda.gridDim.x
+    g_y_height = cuda.gridDim.y
+    gx = cuda.blockIdx.x
+    gy = cuda.blockIdx.y
+    gox = g_x_width * gx
+    goy = g_y_height * gy
+
+    # Initialize shared memory
+    block_cache = cuda.shared.array(
+        shape=(TPB_PLUS_TWO, TPB_PLUS_TWO), dtype=nb.types.float32
+    )
+
+    # DEBUG INIT SHARED MEMORY
+    for six in range(TPB_PLUS_TWO):
+        for siy in range(TPB_PLUS_TWO):
+            block_cache[six, siy] = -0.6
+    cuda.syncthreads()
+
+    # Copy from edges_i to shared memory
+    edges_x = x - x_offset
+    edges_y = y - y_offset
+    if edges_x >= 0 and edges_x < x_width and edges_y >= 0 and edges_y < y_height:
+        block_cache[l_x + 1, l_y + 1] = edges_i[edges_x, edges_y]
+    else:
+        block_cache[l_x + 1, l_y + 1] = 0.0
+    # Copy the border pixels without the corners
+    # left border
+    if l_x == 0:
+        x_left = edges_x - 1
+        if edges_y >= 0 and edges_y < y_height and x_left >= 0 and x_left < x_width:
+            block_cache[0, l_y + 1] = edges_i[x_left, edges_y]
+        else:
+            block_cache[0, l_y + 1] = 0.0
+    # right border
+    if l_x == TPB - 1:
+        x_right = edges_x + 1
+        if edges_y >= 0 and edges_y < y_height and x_right >= 0 and x_right < x_width:
+            block_cache[TPB + 1, l_y + 1] = edges_i[x_right, edges_y]
+        else:
+            block_cache[TPB + 1, l_y + 1] = 0.0
+    # top border
+    if l_y == 0:
+        y_top = edges_y - 1
+        if edges_x >= 0 and edges_x < x_width and y_top >= 0 and y_top < y_height:
+            block_cache[l_x + 1, 0] = edges_i[edges_x, y_top]
+        else:
+            block_cache[l_x + 1, 0] = 0.0
+    # bottom border
+    if l_y == TPB - 1:
+        y_bottom = edges_y + 1
+        if edges_x >= 0 and edges_x < x_width and y_bottom >= 0 and y_bottom < y_height:
+            block_cache[l_x + 1, TPB + 1] = edges_i[edges_x, y_bottom]
+        else:
+            block_cache[l_x + 1, TPB + 1] = 0.0
+    # Copy the corners
+    # top left
+    if l_x == 0 and l_y == 0:
+        x_left = edges_x - 1
+        y_top = edges_y - 1
+        if x_left >= 0 and x_left < x_width and y_top >= 0 and y_top < y_height:
+            block_cache[0, 0] = edges_i[x_left, y_top]
+        else:
+            block_cache[0, 0] = 0.0
+    # top right
+    if l_x == TPB - 1 and l_y == 0:
+        x_right = edges_x + 1
+        y_top = edges_y - 1
+        if x_right >= 0 and x_right < x_width and y_top >= 0 and y_top < y_height:
+            block_cache[TPB + 1, 0] = edges_i[x_right, y_top]
+        else:
+            block_cache[TPB + 1, 0] = 0.0
+    # bottom left
+    if l_x == 0 and l_y == TPB - 1:
+        x_left = edges_x - 1
+        y_bottom = edges_y + 1
+        if x_left >= 0 and x_left < x_width and y_bottom >= 0 and y_bottom < y_height:
+            block_cache[0, TPB + 1] = edges_i[x_left, y_bottom]
+        else:
+            block_cache[0, TPB + 1] = 0.0
+    # bottom right
+    if l_x == TPB - 1 and l_y == TPB - 1:
+        x_right = edges_x + 1
+        y_bottom = edges_y + 1
+        if x_right >= 0 and x_right < x_width and y_bottom >= 0 and y_bottom < y_height:
+            block_cache[TPB + 1, TPB + 1] = edges_i[x_right, y_bottom]
+        else:
+            block_cache[TPB + 1, TPB + 1] = 0.0
+    cuda.syncthreads()
+
+    # START DEBUG SINGLE SHARED MEM BLOCK
+    if x < x_width or y < y_height:
+        edges_o[x, y] = -0.5
+    cuda.syncthreads()
+
+    # copy the first block of shared memory to global memory
+    if cuda.blockIdx.x == 1 and cuda.blockIdx.y == 1:
+        for six in range(0, TPB_PLUS_TWO):
+            for siy in range(0, TPB_PLUS_TWO):
+                edges_o[six, siy] = block_cache[six, siy]
+    return
+    # END DEBUG SINGLE SHARED MEM BLOCK
+
+    return
 
 
-@cuda.jit(fastmath=True, func_or_sig=void(float32[:, :], float32, float32))
-def _kernel_hysteresis(
-    gradients_io: np.array, low_threshold: float, high_threshold: float
-):
-    _dev_hysteresis(gradients_io, low_threshold, high_threshold)
+def hysteresis(gradients_i: np.array, low_high_thresholds_i: np.array) -> np.array:
+    """Apply hysteresis to the input gradients image.
+
+    :param gradients_i: Edge strength of the image in range [0.,1.]
+    :type gradients_i: np.array
+
+    :param low_high_thresholds_i: Array with the low and high threshold for the hysteresis
+    :type low_high_thresholds_i: np.array with shape (2,) with dtype = np.float32
+
+    :return: Edge image with values either 0 or 1
+    :rtype: np.array with shape (height, width) with dtype = np.floating
+    """
+
+    # Disable warnings about low gpu utilization in the test suite
+    old_cuda_low_occupancy_warnings = nb.config.CUDA_LOW_OCCUPANCY_WARNINGS
+    nb.config.CUDA_LOW_OCCUPANCY_WARNINGS = 0
+
+    stream = cuda.stream()
+
+    height, width = gradients_i.shape
+    blockspergrid_x = math.ceil(height / TPB)
+    blockspergrid_y = math.ceil(width / TPB)
+    blockspergrid = (blockspergrid_x, blockspergrid_y)
+
+    # Check if the image buffer needs to be copied to the device
+    gradients_on_device = is_cuda_array(gradients_i)
+    d_gradients_i = (
+        gradients_i
+        if gradients_on_device
+        else cuda.to_device(gradients_i, stream=stream)
+    )
+    low_high_thresholds_on_device = is_cuda_array(low_high_thresholds_i)
+    d_low_high_thresholds_i = (
+        low_high_thresholds_i
+        if low_high_thresholds_on_device
+        else cuda.to_device(low_high_thresholds_i, stream=stream)
+    )
+    any_input_on_device = gradients_on_device or low_high_thresholds_on_device
+
+    # Allocate arrays
+    d_edges_o = cuda.device_array((height, width), dtype=np.float32, stream=stream)
+    d_pixel_offset_i = cuda.to_device(np.array([0, 0], dtype=np.int32), stream=stream)
+    d_something_changed_flag = cuda.device_array(1, dtype=np.bool_, stream=stream)
+
+    # Apply hysteresis thresholding
+    _kernel_hysteresis[blockspergrid, (TPB, TPB), stream](
+        d_gradients_i,
+        d_low_high_thresholds_i,
+        d_pixel_offset_i,
+        d_edges_o,
+        d_something_changed_flag,
+    )
+
+    edges_o = (
+        d_edges_o if any_input_on_device else d_edges_o.copy_to_host(stream=stream)
+    )
+
+    # Reset warnings
+    nb.config.CUDA_LOW_OCCUPANCY_WARNINGS = old_cuda_low_occupancy_warnings
+
+    stream.synchronize()
+
+    return edges_o
 
 
 def canny_edge_detection(

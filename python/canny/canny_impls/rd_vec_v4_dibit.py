@@ -366,6 +366,23 @@ def _hysteresis(gradients_i: np.array, low: float, high: float) -> np.array:
     return edges
 
 
+def hysteresis(gradients_i: np.array, low_high_thresholds_i: np.array) -> np.array:
+    """Apply hysteresis to the input gradients image.
+
+    :param gradients_i: Edge strength of the image in range [0.,1.]
+    :type gradients_i: np.array
+
+    :param low_high_thresholds_i: Array with the low and high threshold for the hysteresis
+    :type low_high_thresholds_i: np.array with shape (2,) with dtype = np.float32
+
+    :return: Edge image with values either 0 or 1
+    :rtype: np.array with shape (height, width) with dtype = np.floating
+    """
+
+    edges = _hysteresis(gradients_i, low_high_thresholds_i[0], low_high_thresholds_i[1])
+    return edges
+
+
 def canny_edge_detection(
     image_u8_i: np.array,
     sigma: float,
