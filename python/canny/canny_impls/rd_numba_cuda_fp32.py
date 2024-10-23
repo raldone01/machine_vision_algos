@@ -45,8 +45,8 @@ def _dev_gauss(image_i: np.array, image_o: np.array, sigma: float):
     x_thread, y_thread = cuda.threadIdx.x, cuda.threadIdx.y
 
     # compute the kernel radius
-    one_dir = math.ceil(3.0 * sigma)
-    kernel_width = int(2.0 * one_dir + 1.0)
+    kernel_width_half = math.ceil(3.0 * sigma)
+    kernel_width = int(2.0 * kernel_width_half + 1.0)
     # TODO: The kernel should fit into a local array.
     # TODO: Check if it is faster if each thread computes the kernel on its own.
     # TODO: Check if its faster if the kernel is stored in constant memory or passed as an argument.
@@ -59,8 +59,8 @@ def _dev_gauss(image_i: np.array, image_o: np.array, sigma: float):
         for j in range(y_thread, kernel_width, cuda.blockDim.y):
             # Ensure we only compute values within bounds
             if i < kernel_width and j < kernel_width:
-                x_k = i - one_dir
-                y_k = j - one_dir
+                x_k = i - kernel_width_half
+                y_k = j - kernel_width_half
                 kernel_val = (
                     math.exp(-(x_k**2.0 + y_k**2.0) / (2.0 * (sigma**2.0)))
                 ) / factor
@@ -77,12 +77,12 @@ def _dev_gauss(image_i: np.array, image_o: np.array, sigma: float):
     if not (x < x_width and y < y_height):
         return
 
-    one_dir = int(one_dir)
+    kernel_width_half = int(kernel_width_half)
 
     result = 0.0
     # Now properly apply the kernel across relevant neighbors
-    for i in range(-one_dir, one_dir + 1):
-        for j in range(-one_dir, one_dir + 1):
+    for i in range(-kernel_width_half, kernel_width_half + 1):
+        for j in range(-kernel_width_half, kernel_width_half + 1):
             x_i = x + i
             y_j = y + j
             if x_i < 0:
@@ -93,7 +93,9 @@ def _dev_gauss(image_i: np.array, image_o: np.array, sigma: float):
                 y_j = 0
             if y_j >= y_height:
                 y_j = y_height - 1
-            kernel_val = kernel[i + one_dir, j + one_dir] * image_i[x_i, y_j]
+            kernel_val = (
+                kernel[i + kernel_width_half, j + kernel_width_half] * image_i[x_i, y_j]
+            )
             result += kernel_val
 
     # Write back the result to the image
