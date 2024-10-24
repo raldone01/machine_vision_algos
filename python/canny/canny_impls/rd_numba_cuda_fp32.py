@@ -38,51 +38,50 @@ def _kernel_convert_to_float32(input_i: np.array, output_o: np.array):
         output_o[x, y] = input_i[x, y] / 255.0
 
 
-@cuda.jit(
-    fastmath=True, func_or_sig=void(float32[:, :], float32[:, :], float32), device=True
-)
-def _dev_gauss(image_i: np.array, image_o: np.array, sigma: float):
-    x_thread, y_thread = cuda.threadIdx.x, cuda.threadIdx.y
+MAX_2D_DIM_F32_SHARED_ARRAY = 110
 
-    # compute the kernel radius
-    kernel_width_half = math.ceil(3.0 * sigma)
-    kernel_width = int(2.0 * kernel_width_half + 1.0)
-    # TODO: The kernel should fit into a local array.
-    # TODO: Check if it is faster if each thread computes the kernel on its own.
-    # TODO: Check if its faster if the kernel is stored in constant memory or passed as an argument.
-    # kernel = cuda.shared.array(shape=(kernel_width, kernel_width), dtype=np.float32)
-    kernel = cuda.shared.array((100, 100), dtype=nb.types.float32)
+
+@cuda.jit(fastmath=True, func_or_sig=void(float32[:, :], float32[:, :], float32))
+def _kernel_gauss(image_i: np.array, image_o: np.array, sigma: float):
+    x_width, y_height = image_i.shape
+
+    # pixel coordinates
+    x = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x
+    y = cuda.blockIdx.y * cuda.blockDim.y + cuda.threadIdx.y
+
+    # local thread coordinates
+    l_x = cuda.threadIdx.x
+    l_y = cuda.threadIdx.y
+
+    l_x_size = cuda.blockDim.x
+    l_y_size = cuda.blockDim.y
+
+    # compute half of the kernel width
+    kernel_width_half = int(math.ceil(3.0 * sigma)) + 1
+    kernel = cuda.shared.array(
+        (MAX_2D_DIM_F32_SHARED_ARRAY, MAX_2D_DIM_F32_SHARED_ARRAY),
+        dtype=nb.types.float32,
+    )
 
     factor = 2.0 * math.pi * (sigma**2.0)
-    # Loop over the kernel elements in chunks that fit in shared memory
-    for i in range(x_thread, kernel_width, cuda.blockDim.x):
-        for j in range(y_thread, kernel_width, cuda.blockDim.y):
-            # Ensure we only compute values within bounds
-            if i < kernel_width and j < kernel_width:
-                x_k = i - kernel_width_half
-                y_k = j - kernel_width_half
-                kernel_val = (
-                    math.exp(-(x_k**2.0 + y_k**2.0) / (2.0 * (sigma**2.0)))
-                ) / factor
-                kernel[i, j] = kernel_val
 
-    # TODO: cache the block of the image in shared memory
-
+    # Compute one quarter of the kernel and store it in shared memory
+    for i in range(l_x, kernel_width_half, l_x_size):
+        for j in range(l_y, kernel_width_half, l_y_size):
+            kernel_val = (math.exp(-(i**2.0 + j**2.0) / (2.0 * (sigma**2.0)))) / factor
+            kernel[i, j] = kernel_val
     cuda.syncthreads()
 
-    x, y = cuda.grid(2)
-
-    # Perform convolution: Only execute if within image bounds
+    # Only execute if within image bounds
     x_width, y_height = image_i.shape
     if not (x < x_width and y < y_height):
         return
 
-    kernel_width_half = int(kernel_width_half)
-
+    # TODO: the 4 quadrant computations can be optimized to be done in parallel
     result = 0.0
-    # Now properly apply the kernel across relevant neighbors
-    for i in range(-kernel_width_half, kernel_width_half + 1):
-        for j in range(-kernel_width_half, kernel_width_half + 1):
+    # First Quadrant
+    for i in range(0, kernel_width_half):
+        for j in range(0, kernel_width_half):
             x_i = x + i
             y_j = y + j
             if x_i < 0:
@@ -93,9 +92,52 @@ def _dev_gauss(image_i: np.array, image_o: np.array, sigma: float):
                 y_j = 0
             if y_j >= y_height:
                 y_j = y_height - 1
-            kernel_val = (
-                kernel[i + kernel_width_half, j + kernel_width_half] * image_i[x_i, y_j]
-            )
+            kernel_val = kernel[i, j] * image_i[x_i, y_j]
+            result += kernel_val
+    # Second Quadrant
+    for i in range(1, kernel_width_half):
+        for j in range(1, kernel_width_half):
+            x_i = x - i
+            y_j = y - j
+            if x_i < 0:
+                x_i = 0
+            if x_i >= x_width:
+                x_i = x_width - 1
+            if y_j < 0:
+                y_j = 0
+            if y_j >= y_height:
+                y_j = y_height - 1
+            kernel_val = kernel[i, j] * image_i[x_i, y_j]
+            result += kernel_val
+    # Third Quadrant
+    for i in range(1, kernel_width_half):
+        for j in range(0, kernel_width_half):
+            x_i = x - i
+            y_j = y + j
+            if x_i < 0:
+                x_i = 0
+            if x_i >= x_width:
+                x_i = x_width - 1
+            if y_j < 0:
+                y_j = 0
+            if y_j >= y_height:
+                y_j = y_height - 1
+            kernel_val = kernel[i, j] * image_i[x_i, y_j]
+            result += kernel_val
+    # Fourth Quadrant
+    for i in range(0, kernel_width_half):
+        for j in range(1, kernel_width_half):
+            x_i = x + i
+            y_j = y - j
+            if x_i < 0:
+                x_i = 0
+            if x_i >= x_width:
+                x_i = x_width - 1
+            if y_j < 0:
+                y_j = 0
+            if y_j >= y_height:
+                y_j = y_height - 1
+            kernel_val = kernel[i, j] * image_i[x_i, y_j]
             result += kernel_val
 
     # Write back the result to the image
@@ -104,16 +146,26 @@ def _dev_gauss(image_i: np.array, image_o: np.array, sigma: float):
     plot_kernel = False
     if plot_kernel:
         image_o[x, y] = result
-        if x < kernel_width and y < kernel_width:
+        # Dump the kernel in the top left corner of the image
+        if (
+            x < MAX_2D_DIM_F32_SHARED_ARRAY
+            and y < MAX_2D_DIM_F32_SHARED_ARRAY
+            and x < x_width
+            and y < y_height
+        ):
             image_o[x, y] = kernel[x, y] * factor
     else:
         image_o[x, y] = result
 
 
-# TODO: check if its faster to use a two arrays instead of the io parameter
-@cuda.jit(fastmath=True, func_or_sig=void(float32[:, :], float32[:, :], float32))
-def _kernel_gauss(image_i: np.array, image_o: np.array, sigma: float):
-    _dev_gauss(image_i, image_o, sigma)
+def check_gauss_kernel_size(sigma: float):
+    kernel_width_half = int(math.ceil(3.0 * sigma)) + 1
+    kernel_width = 2 * math.ceil(3 * sigma) + 1
+    if kernel_width_half > MAX_2D_DIM_F32_SHARED_ARRAY:
+        max_supported_width = MAX_2D_DIM_F32_SHARED_ARRAY * 2 - 1
+        raise ValueError(
+            f"Kernel width {kernel_width} is too large. Maximum supported width is {max_supported_width}."
+        )
 
 
 def blur_gauss(image_u8_i: np.array, sigma: float) -> np.array:
@@ -156,6 +208,7 @@ def blur_gauss(image_u8_i: np.array, sigma: float) -> np.array:
     # Allocate output array
     d_blurred_o = cuda.device_array(image_u8_i.shape, dtype=np.float32, stream=stream)
     # Apply Gaussian filter
+    check_gauss_kernel_size(sigma)
     _kernel_gauss[blockspergrid, (TPB, TPB), stream](d_image_i, d_blurred_o, sigma)
 
     blurred = (
