@@ -819,26 +819,26 @@ def _kernel_hysteresis(
     # 2) Expand the strong edges to the weak edges
     # Borders can be ignored because they are handled by other thread blocks
 
+    lo_x = l_x + 1
+    lo_y = l_y + 1
+
     is_discard_or_strong = False
     # 2.1) Snap all edges above the high threshold to 1.0
-    edge = block_cache[l_x + 1, l_y + 1]
+    edge = block_cache[lo_x, lo_y]
     if edge >= high:
-        block_cache[l_x + 1, l_y + 1] = 1.0
+        block_cache[lo_x, lo_y] = 1.0
         is_discard_or_strong = True
     # 2.2) Discard all edges below the low threshold
     elif edge < low:
-        block_cache[l_x + 1, l_y + 1] = 0.0
+        block_cache[lo_x, lo_y] = 0.0
         is_discard_or_strong = True
 
     # 3) Expand the strong edges to the weak edges
     found_new_edge_this_iteration = 1
     found_new_edge = False
-    while found_new_edge_this_iteration:  # TODO: REPORT DEADLOCK IN CUDA TO NUMBA IF syncthreads_or IS USED HERE IN THE WHILE. CUDASIM IS WORKING
+    while cuda.syncthreads_or(found_new_edge_this_iteration):
         found_new_edge_this_iteration = 0
         if not is_discard_or_strong:
-            lo_x = l_x + 1
-            lo_y = l_y + 1
-
             # 3.1) Check if the weak edge has a strong edge neighbour
             # top left
             found_new_edge_this_iteration |= block_cache[lo_x - 1, lo_y - 1] == 1.0
@@ -862,9 +862,6 @@ def _kernel_hysteresis(
                 block_cache[lo_x, lo_y] = 1.0
                 is_discard_or_strong = True
                 found_new_edge = True
-        found_new_edge_this_iteration = cuda.syncthreads_or(
-            found_new_edge_this_iteration
-        )
 
     any_new_edge_found = cuda.syncthreads_or(int(found_new_edge))
 
