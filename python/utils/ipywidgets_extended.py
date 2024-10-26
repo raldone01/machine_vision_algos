@@ -1,3 +1,5 @@
+import asyncio
+
 import ipywidgets as wid
 from ipywidgets import Layout
 
@@ -65,3 +67,41 @@ class ManyBoxes:
     def select(self, choices: list[str]) -> None:
         for checkbox in self._checkboxes:
             checkbox.value = checkbox.description in choices
+
+    def get_selected(self) -> list[str]:
+        return [checkbox.description for checkbox in self._checkboxes if checkbox.value]
+
+
+class CenteredColumn:
+    def __init__(self, child):
+        self._view = wid.GridBox(
+            children=[wid.VBox(), child, wid.VBox()],
+            layout=wid.Layout(
+                grid_template_columns="1fr 3fr 1fr",
+            ),
+        )
+
+    def get_view(self) -> wid.GridBox:
+        return self._view
+
+
+def async_observe(widget, value):
+    future = asyncio.Future()
+
+    def wrapped_callback(change):
+        future.set_result(change.new)
+        widget.unobserve(wrapped_callback, value)
+
+    widget.observe(wrapped_callback, value)
+    return future
+
+
+def async_on_click(widget):
+    future = asyncio.Future()
+
+    def wrapped_callback(change):
+        future.set_result(change)
+        widget._click_handlers.callbacks = []
+
+    widget.on_click(wrapped_callback)
+    return future

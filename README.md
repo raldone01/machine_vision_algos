@@ -1,6 +1,6 @@
 # Machine Vision Algos
 
-The machine vision alogs repository contains implementations for the following algorithms:
+The machine vision algorithms repository contains implementations for the following algorithms:
 
 * Canny-End-To-End: Edge detector
 
@@ -12,6 +12,8 @@ conda env create --file python/conda_env.yml --prefix .conda
 ```
 
 ## Canny-End-To-End
+
+[See more `python/canny`.](python/canny)
 
 [`python/canny/canny_playground.ipynb`](python/canny/canny_playground.ipynb) is an interactive notebook that allows one to play around with the canny algorithm.
 
@@ -29,12 +31,24 @@ Find it here [`rd_numba_cuda_fp32.py`](python/canny/canny_impls/rd_numba_cuda_fp
 
 ### Vec v4 dibit
 
-This implementation uses only numpy and scipy.
+This is a vectorized canny implementation.
+It uses only numpy and scipy.
 It runs on the cpu.
 
 Find it here [`rd_vec_v4_dibit.py`](python/canny/canny_impls/rd_vec_v4_dibit.py).
 
-### TODO:
+### TODO Implementations
 
-* Canny-end-to-end
-* Benchmark notebook
+* enable multiprocessing for opencv and numba on cpus
+* numba stencil
+* numba normal jit with loops
+* opencv2 only
+
+## TODO
+
+* Benchmark notebook: Add system information like gpu, cpu, ram, ...
+
+## Usage as teaching material
+
+Feel free to use anything in this repository as teaching materials.
+If you do, I would love to be mentioned as a source.

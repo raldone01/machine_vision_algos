@@ -1,6 +1,8 @@
 import os
 import re
 
+from utils.plotting_tools import setup_rc_params
+
 
 def is_notebook() -> bool:
     try:
@@ -16,8 +18,8 @@ def is_notebook() -> bool:
 
 
 def source_code_path_is_from_notebook(source_file: str) -> bool:
-    if not is_notebook():
-        return False
+    # if not is_notebook():
+    #    return False
 
     # Normalize path to ensure compatibility
     normalized_path = os.path.normpath(source_file)
@@ -64,3 +66,4 @@ def init_notebook() -> None:
         plt.style.use("fast")
     except ImportError:
         pass
+    setup_rc_params()

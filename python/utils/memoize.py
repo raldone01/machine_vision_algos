@@ -56,11 +56,18 @@ def get(key: str, default):
         value = memoize_shelve[key]
         value.access_count += 1
         value.last_read = time.time()
+        memoize_shelve[key] = value
         return value.value
     else:
         value = _create_value(default)
         memoize_shelve[key] = value
+        memoize_shelve.sync()
         return default
+
+
+def has_key(key: str) -> bool:
+    global memoize_shelve
+    return key in memoize_shelve
 
 
 def set(key: str, data):
@@ -85,14 +92,19 @@ def delete_keys(keys: list):
     memoize_shelve.sync()
 
 
-def delete_unused_keys(older_than_seconds: int):
+def delete_unused_keys(older_than_seconds: int) -> list[str]:
     global memoize_shelve
+
+    cleaned_keys = []
+
     keys = list(memoize_shelve.keys())
     for key in keys:
         value = memoize_shelve[key]
         if time.time() - value.last_read > older_than_seconds:
             del memoize_shelve[key]
+            cleaned_keys.append(key)
     memoize_shelve.sync()
+    return cleaned_keys
 
 
 def close():

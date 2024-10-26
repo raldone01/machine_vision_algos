@@ -7,8 +7,27 @@ import numpy as np
 from PIL import Image as PILImage
 from IPython.display import Image
 from ipywidgets import widgets
+from icecream import ic
 
 open_cnt = 0
+
+SMALL_SIZE = 22
+MEDIUM_SIZE = 26
+BIGGER_SIZE = 60
+
+rc_params_better = {
+    "figure.titlesize": BIGGER_SIZE,
+    "font.size": SMALL_SIZE,
+    "axes.titlesize": BIGGER_SIZE,
+    "axes.labelsize": MEDIUM_SIZE,
+    "xtick.labelsize": SMALL_SIZE,
+    "ytick.labelsize": SMALL_SIZE,
+    "legend.fontsize": SMALL_SIZE,
+}
+
+
+def setup_rc_params():
+    plt.rcParams.update(rc_params_better)
 
 
 class SmartFigure:
@@ -17,37 +36,11 @@ class SmartFigure:
     It closes the figure when the object is destroyed.
     """
 
-    def __init__(self, figsize=(14, 14), dpi=100, rc_params=None, **kwargs):
+    def __init__(self, figsize=(14, 14), dpi=100, **kwargs):
         self._logger = logging.Logger("SmartFigure")
 
-        rc_params_default = plt.rcParams.copy()
-
-        # https://stackoverflow.com/a/39566040/4479969
-        SMALL_SIZE = 22
-        MEDIUM_SIZE = 26
-        BIGGER_SIZE = 60
-
-        rc_params_better = {
-            "figure.titlesize": BIGGER_SIZE,
-            "font.size": SMALL_SIZE,
-            "axes.titlesize": BIGGER_SIZE,
-            "axes.labelsize": MEDIUM_SIZE,
-            "xtick.labelsize": SMALL_SIZE,
-            "ytick.labelsize": SMALL_SIZE,
-            "legend.fontsize": SMALL_SIZE,
-        }
-
-        rc_params_default.update(rc_params_better)
-
-        if rc_params is not None:
-            rc_params_default.update(rc_params)
-
         with plt.ioff():
-            if rc_params is not None:
-                with plt.rc_context(rc_params):
-                    self.fig = plt.figure(figsize=figsize, dpi=dpi, **kwargs)
-            else:
-                self.fig = plt.figure(figsize=figsize, dpi=dpi, **kwargs)
+            self.fig = plt.figure(figsize=figsize, dpi=dpi, **kwargs)
 
         # Minor ticks can't be styled in the style-sheet
         for ax in self.fig.axes:

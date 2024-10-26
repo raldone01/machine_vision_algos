@@ -1,20 +1,21 @@
+import os
+import logging
 from functools import wraps
+from dataclasses import astuple, dataclass
 from time import perf_counter_ns
+from datetime import datetime, timezone
 from contextlib import contextmanager
 import inspect
 import unittest.mock as mock
-import numpy as np
-import matplotlib.pyplot as plt
-import pandas as pd
-from icecream import ic
-import os
-import matplotlib.style as mplstyle
-import logging
-from colorama import Fore, Style
-import pathlib
 from pathlib import Path
 
+import numpy as np
+from icecream import ic
+from colorama import Fore, Style
+
 from utils.setup_notebook import source_code_path_is_from_notebook, get_notebook_dir
+
+_default_log_func = logging.info
 
 
 def set_default_log_func(log_func):
@@ -22,33 +23,47 @@ def set_default_log_func(log_func):
     _default_log_func = log_func
 
 
-def format_time(elapsed_ns: int) -> tuple:
+@dataclass
+class FormatTimeNsResult:
+    elapsed: float
+    unit: str
+    color: str
+    scale: int
+
+    def __iter__(self):
+        return iter(astuple(self))
+
+    def __str__(self):
+        return f"{self.color}{self.elapsed:,.4f} {self.unit}{Style.RESET_ALL}"
+
+
+def format_time_ns(elapsed_ns: int) -> FormatTimeNsResult:
     """
     Helper function to format the elapsed time in the appropriate unit
     (seconds, milliseconds, microseconds, or nanoseconds).
     """
     if elapsed_ns >= 1_000_000_000:  # More than or equal to 1 second
-        elapsed = elapsed_ns / 1_000_000_000
+        scale = 1_000_000_000
+        elapsed = elapsed_ns / scale
         unit = "s"
         color = Fore.RED
     elif elapsed_ns >= 1_000_000:  # More than or equal to 1 millisecond
-        elapsed = elapsed_ns / 1_000_000
+        scale = 1_000_000
+        elapsed = elapsed_ns / scale
         unit = "ms"
         color = Fore.BLUE
     elif elapsed_ns >= 1_000:  # More than or equal to 1 microsecond
-        elapsed = elapsed_ns / 1_000
+        scale = 1_000
+        elapsed = elapsed_ns / scale
         unit = "µs"
         color = Fore.GREEN
     else:
+        scale = 1
         elapsed = elapsed_ns
         unit = "ns"
         color = Fore.LIGHTBLACK_EX
-    return elapsed, unit, color
 
-
-def format_time_str(elapsed_ns: int) -> str:
-    elapsed, unit, color = format_time(elapsed_ns)
-    return f"{color}{elapsed:,.4f} {unit}{Style.RESET_ALL}"
+    return FormatTimeNsResult(elapsed, unit, color, scale)
 
 
 def _get_debug_info_string(source_file: str, line_number: int):
@@ -94,7 +109,7 @@ def time_function(log_before: bool = True, log_func=None):
             # Print with optional colored output if colorama is available
             log_func(
                 f"{Fore.BLACK}func: {f.__name__!r} {Style.RESET_ALL}took: "
-                f"{format_time_str(elapsed_ns)} "
+                f"{format_time_ns(elapsed_ns)} "
                 f"{debug_info}"
             )
 
@@ -135,39 +150,44 @@ def time_line(description: str = "Code", log_before: bool = True, log_func=None)
     # Log in standard editor format with colors if available: filename and line_number
     log_func(
         f"{Fore.BLACK}{description} {Style.RESET_ALL}took: "
-        f"{format_time_str(elapsed_ns)} "
+        f"{format_time_ns(elapsed_ns)} "
         f"{debug_info}"
     )
 
 
+@dataclass
 class BenchmarkResult:
-    def __init__(self):
-        self.name = ""
-        self.mean = 0
-        self.std_dev = 0
-        self.min = 0
-        self.max = 0
-        self.runs = 0
-        self.warmup_runs = 0
-        self.runtimes = None
+    name: str = ""
+    mean: float = 0.0
+    std_dev: float = 0.0
+    min: int = 0
+    max: int = 0
+    runs: int = 0
+    warmup_runs: int = 0
+    runtimes: np.ndarray = None
+    output: any = None
+    start_time: int = 0
+    end_time: int = 0
+
+    def __iter__(self):
+        return iter(astuple(self))
 
     def __str__(self):
         return (
-            f"{self.name}: mean={format_time_str(self.mean)}, "
-            f"std_dev={format_time_str(self.std_dev)}, "
-            f"min={format_time_str(self.min)}, "
-            f"max={format_time_str(self.max)}, "
+            f"{self.name}: mean={format_time_ns(self.mean)}, "
+            f"std_dev={format_time_ns(self.std_dev)}, "
+            f"min={format_time_ns(self.min)}, "
+            f"max={format_time_ns(self.max)}, "
             f"runs={self.runs}, warmup_runs={self.warmup_runs}"
         )
-
-    def __repr__(self):
-        return str(self)
 
 
 def benchmark_fun(
     name, fun, warmup_runs: int = 100, runs: int = 1000, *args, **kwargs
 ) -> BenchmarkResult:
-    runtimes = np.empty(runs, dtype=np.int64)
+    start_time = datetime.now(timezone.utc).timestamp()
+    runtimes = np.empty((runs), dtype=np.int64)
+    output = fun(*args, **kwargs)
     # Warm-up runs
     for _ in range(warmup_runs):
         fun(*args, **kwargs)
@@ -185,6 +205,8 @@ def benchmark_fun(
     min_runtime = np.min(runtimes)
     max_runtime = np.max(runtimes)
 
+    end_time = datetime.now(timezone.utc).timestamp()
+
     # Return the results
     result = BenchmarkResult()
     result.name = name
@@ -195,6 +217,9 @@ def benchmark_fun(
     result.runs = runs
     result.warmup_runs = warmup_runs
     result.runtimes = runtimes
+    result.output = output
+    result.start_time = start_time
+    result.end_time = end_time
     return result
 
 
