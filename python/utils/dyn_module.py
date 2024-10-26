@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import os
 from importlib import reload
 from pathlib import Path
 
@@ -23,6 +24,7 @@ def load_module(file_path: str):
         with time_line(f"Reloading {module_name}"):
             module = sys.modules[module_name]
             reload(module)
+        assert module.__name__ == module_name
         return module
 
     with time_line(f"Loading {module_name}"):
@@ -33,5 +35,21 @@ def load_module(file_path: str):
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
+        assert module.__name__ == module_name
 
     return module
+
+
+def load_modules(folder_path: str) -> list[str]:
+    module_file_paths = [f for f in os.listdir(folder_path) if str(f).endswith(".py")]
+    module_file_paths.sort()
+
+    module_names = []
+
+    with time_line(f"Loading {len(module_file_paths)} modules"):
+        for image_filename in module_file_paths:
+            full_path = Path(folder_path) / image_filename
+            module = load_module(full_path)
+            module_names.append(module.__name__)
+
+    return module_names

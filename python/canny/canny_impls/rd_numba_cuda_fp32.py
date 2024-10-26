@@ -964,7 +964,9 @@ def _kernel_hysteresis_final_filter(
     edges_o[x, y] = val
 
 
-def hysteresis(gradients_i: np.array, low_high_thresholds_i: np.array) -> np.array:
+def hysteresis(
+    gradients_i: np.array, low_high_thresholds_i: np.array, stream_i=None
+) -> np.array:
     """Apply hysteresis to the input gradients image.
 
     :param gradients_i: Edge strength of the image in range [0.,1.]
@@ -981,7 +983,7 @@ def hysteresis(gradients_i: np.array, low_high_thresholds_i: np.array) -> np.arr
     old_cuda_low_occupancy_warnings = nb.config.CUDA_LOW_OCCUPANCY_WARNINGS
     nb.config.CUDA_LOW_OCCUPANCY_WARNINGS = 0
 
-    stream = cuda.stream()
+    stream = cuda.stream() if stream_i is None else stream_i
 
     height, width = gradients_i.shape
     blockspergrid_x = math.ceil(height / TPB)
@@ -1047,6 +1049,8 @@ def hysteresis(gradients_i: np.array, low_high_thresholds_i: np.array) -> np.arr
         )[0]
         stream.synchronize()
         it += 1
+
+        # TODO: at the end of the kernel this can be done on the gpu
         if it % 2 != 0:
             pixel_offset[0] = pixel_offset_shift
             pixel_offset[1] = pixel_offset_shift
@@ -1073,7 +1077,8 @@ def hysteresis(gradients_i: np.array, low_high_thresholds_i: np.array) -> np.arr
     # Reset warnings
     nb.config.CUDA_LOW_OCCUPANCY_WARNINGS = old_cuda_low_occupancy_warnings
 
-    stream.synchronize()
+    if stream_i is None:
+        stream.synchronize()
 
     return edges_o
 
@@ -1081,7 +1086,7 @@ def hysteresis(gradients_i: np.array, low_high_thresholds_i: np.array) -> np.arr
 def canny_edge_detection(
     image_u8_i: np.array,
     sigma: float,
-    low_high: np.array,
+    low_high_i: np.array,
     auto_threshold: bool = False,
 ) -> np.array:
     """Apply Canny edge detection to the input image.
@@ -1092,8 +1097,8 @@ def canny_edge_detection(
     :param sigma: Standard deviation of the gaussian filter
     :type sigma: float
 
-    :param low_high: Array with the low and high threshold for the hysteresis. If auto_threshold is True this array will be used as the proportion of the lowest and highest gradient values to be used as the low and high threshold.
-    :type low_high: np.array with shape (2,) with dtype = np.float32
+    :param low_high_i: Array with the low and high threshold for the hysteresis. If auto_threshold is True this array will be used as the proportion of the lowest and highest gradient values to be used as the low and high threshold.
+    :type low_high_i: np.array with shape (2,) with dtype = np.float32
 
     :param auto_threshold: Use automatic thresholding
     :type auto_threshold: bool
@@ -1101,8 +1106,6 @@ def canny_edge_detection(
     :return: Edge image with values between 0 and 1 if hysteresis is skipped otherwise either 0 or 1.
     :rtype: np.array with shape (height, width) with dtype = np.floating
     """
-
-    # TODO: check if a single kernel is faster or coordinate multiple kernel calls and used them for better sync
 
     # Disable warnings about low gpu utilization in the test suite
     old_cuda_low_occupancy_warnings = nb.config.CUDA_LOW_OCCUPANCY_WARNINGS
@@ -1121,43 +1124,78 @@ def canny_edge_detection(
         image_u8_i if input_on_device else cuda.to_device(image_u8_i, stream=stream)
     )
 
+    # Compute gaussian blur
+
     # Convert input image to floating
     # Allocate a new array to store the floating image
-    d_image_i = cuda.device_array((height, width), dtype=np.float32, stream=stream)
+    d_image_i = cuda.device_array(image_u8_i.shape, dtype=np.float32, stream=stream)
     _kernel_convert_to_float32[blockspergrid, (TPB, TPB), stream](
         d_image_u8_i, d_image_i
     )
 
-    # Allocate output arrays
-    d_blurred = cuda.device_array((height, width), dtype=np.float32, stream=stream)
-
+    # Allocate output array
+    d_blurred = cuda.device_array(image_u8_i.shape, dtype=np.float32, stream=stream)
     # Apply Gaussian filter
-    # We store the blurred image in the gradients array
+    check_gauss_kernel_size(sigma)
     _kernel_gauss[blockspergrid, (TPB, TPB), stream](d_image_i, d_blurred, sigma)
 
+    # Compute sobel gradients
+
     # Allocate output arrays
-    d_gradients = d_image_i  # Reuse the image buffer for the gradients
-    d_image_i = None
+    d_gradients = cuda.device_array((height, width), dtype=np.float32, stream=stream)
     d_orientations = cuda.device_array((height, width), dtype=np.float32, stream=stream)
 
-    # Compute the sobel gradient
     _kernel_gradient_sobel[blockspergrid, (TPB, TPB), stream](
         d_blurred, d_gradients, d_orientations
     )
 
     # Apply Non-Maxima Suppression
-    _kernel_non_max[blockspergrid, (TPB, TPB), stream](d_gradients, d_orientations)
 
-    # Compute the auto thresholds
+    # Allocate output array
+    # Reuse the blurred array to store the edges
+    d_edges = d_blurred
+    d_blurred = None
+
+    _kernel_non_max[blockspergrid, (TPB, TPB), stream](
+        d_gradients, d_orientations, d_edges
+    )
+
+    # Hysteresis thresholding
+
+    d_low_high_thresholds_i = (
+        low_high_i
+        if is_cuda_array(low_high_i)
+        else cuda.to_device(low_high_i, stream=stream)
+    )
+
     if auto_threshold:
-        low, high = _kernel_compute_hysteresis_auto_thresholds[
-            blockspergrid, (TPB, TPB), stream
-        ](d_gradients, low, high)
+        # Allocate output arrays
+        d_low_high_thresholds_o = cuda.device_array(2, dtype=np.float32, stream=stream)
+        histogram_count = blockspergrid_x * blockspergrid_y
+        # The one at the end is used to store the final histogram
+        histogram_count += 1
 
-    # Apply hysteresis thresholding
-    _kernel_hysteresis[blockspergrid, (TPB, TPB), stream](d_gradients, low, high)
+        d_partial_histograms = cuda.device_array(
+            histogram_count * HISTOGRAM_BIN_COUNT,
+            dtype=np.uint32,
+            stream=stream,
+        )
 
-    edges = d_gradients if input_on_device else d_gradients.copy_to_host(stream=stream)
+        _kernel_compute_edge_histogram_partial[blockspergrid, (TPB, TPB), stream](
+            d_edges, d_partial_histograms
+        )
+
+        TPB_FA = HISTOGRAM_BIN_COUNT
+        blockspergrid_x = math.ceil(histogram_count / TPB_FA)
+        _kernel_compute_edge_histogram_final_accum[blockspergrid_x, TPB_FA, stream](
+            d_partial_histograms, d_low_high_thresholds_i, d_low_high_thresholds_o
+        )
+    else:
+        d_low_high_thresholds_o = d_low_high_thresholds_i
+
+    d_edges = hysteresis(d_edges, d_low_high_thresholds_o)
+
+    edges = d_edges.copy_to_host(stream=stream) if not input_on_device else d_edges
 
     # Reset warnings
     nb.config.CUDA_LOW_OCCUPANCY_WARNINGS = old_cuda_low_occupancy_warnings

@@ -21,8 +21,9 @@ conda env create --file python/conda_env.yml --prefix .conda
 
 This implementation runs on cuda using numba.
 It runs on nvidia gpus.
-The playground notebook has boolean toggle at the top to enable a cuda simulator.
-It runs very slowly but works!
+
+The playground notebook has toggle at the top to enable a cuda simulator.
+The simulator runs very slowly but works!
 
 Find it here [`rd_numba_cuda_fp32.py`](python/canny/canny_impls/rd_numba_cuda_fp32.py).
 

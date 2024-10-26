@@ -434,8 +434,7 @@ def hysteresis(gradients_i: np.array, low_high_thresholds_i: np.array) -> np.arr
 def canny_edge_detection(
     image_u8_i: np.array,
     sigma: float,
-    low: float,
-    high: float,
+    low_high_i: np.array,
     auto_threshold: bool = False,
 ) -> np.array:
     """Apply Canny edge detection to the input image.
@@ -446,11 +445,8 @@ def canny_edge_detection(
     :param sigma: Standard deviation of the gaussian filter
     :type sigma: float
 
-    :param low: Low threshold for the hysteresis
-    :type low: float
-
-    :param high: High threshold for the hysteresis
-    :type high: float
+    :param low_high_i: Array with the low and high threshold for the hysteresis. If auto_threshold is True this array will be used as the proportion of the lowest and highest gradient values to be used as the low and high threshold.
+    :type low_high_i: np.array with shape (2,) with dtype = np.float32
 
     :param auto_threshold: Use automatic thresholding
     :type auto_threshold: bool
@@ -464,7 +460,9 @@ def canny_edge_detection(
     edges = non_max(gradients, orientations)
 
     if auto_threshold:
-        low, high = _compute_hysteresis_auto_thresholds(gradients, 0.1, 0.9)
+        low, high = _compute_hysteresis_auto_thresholds(
+            gradients, low_high_i[0], low_high_i[1]
+        )
 
     edges = _hysteresis(edges, low, high)
 

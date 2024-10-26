@@ -1,5 +1,5 @@
-import re
 import os
+import re
 
 
 def is_notebook() -> bool:
