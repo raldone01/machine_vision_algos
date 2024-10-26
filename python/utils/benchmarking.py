@@ -14,7 +14,7 @@ from colorama import Fore, Style
 import pathlib
 from pathlib import Path
 
-from utils.setup_notebook import source_code_path_is_from_notebook
+from utils.setup_notebook import source_code_path_is_from_notebook, get_notebook_dir
 
 
 def set_default_log_func(log_func):
@@ -53,6 +53,9 @@ def _get_debug_info_string(source_file: str, line_number: int):
             f"{Fore.LIGHTBLACK_EX}(notebook_cell:{line_number}){Style.RESET_ALL}"
         )
     else:
+        if get_notebook_dir() is not None:
+            source_file = Path(source_file).relative_to(get_notebook_dir())
+
         debug_info = (
             f"{Fore.LIGHTBLACK_EX}({source_file}:{line_number}){Style.RESET_ALL}"
         )

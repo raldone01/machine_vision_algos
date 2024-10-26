@@ -28,7 +28,18 @@ def source_code_path_is_from_notebook(source_file: str) -> bool:
     return re.match(r".*[/\\]ipykernel_\d+[/\\]\d+\.py", normalized_path) is not None
 
 
+notebook_dir = None
+
+
+def get_notebook_dir() -> str:
+    return notebook_dir
+
+
 def init_notebook() -> None:
+    global notebook_dir
+    if is_notebook():
+        notebook_dir = os.getcwd()
+
     try:
         if is_notebook():
             import colorama.ansitowin32 as ansito_win32

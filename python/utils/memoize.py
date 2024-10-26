@@ -73,6 +73,7 @@ def set(key: str, data):
     else:
         new_value = _create_value(data)
         memoize_shelve[key] = new_value
+    memoize_shelve.sync()
     return data
 
 
@@ -81,6 +82,7 @@ def delete_keys(keys: list):
     for key in keys:
         if key in memoize_shelve:
             del memoize_shelve[key]
+    memoize_shelve.sync()
 
 
 def delete_unused_keys(older_than_seconds: int):
@@ -90,6 +92,7 @@ def delete_unused_keys(older_than_seconds: int):
         value = memoize_shelve[key]
         if time.time() - value.last_read > older_than_seconds:
             del memoize_shelve[key]
+    memoize_shelve.sync()
 
 
 def close():
