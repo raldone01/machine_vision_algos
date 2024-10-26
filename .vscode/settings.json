@@ -6,4 +6,9 @@
   "python.analysis.extraPaths": [
     "python/utils"
   ],
+  "explorer.fileNesting.enabled": true,
+  "explorer.fileNesting.expand": false,
+  "explorer.fileNesting.patterns": {
+    "*.shelve.dir": "${capture}.shelve.bak,${capture}.shelve.dat",
+  },
 }

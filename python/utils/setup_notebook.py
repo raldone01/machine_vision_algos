@@ -1,4 +1,5 @@
 import re
+import os
 
 
 def is_notebook() -> bool:
@@ -17,9 +18,14 @@ def is_notebook() -> bool:
 def source_code_path_is_from_notebook(source_file: str) -> bool:
     if not is_notebook():
         return False
+
+    # Normalize path to ensure compatibility
+    normalized_path = os.path.normpath(source_file)
+
     # /tmp/ipykernel_30141/770546325.py
-    # match <anypath>/ipykernel_<pid>/<hash>.py
-    return re.match(r".*/ipykernel_\d+/\d+\.py", source_file) is not None
+    # C:\\Users\\_\\AppData\\Local\\Temp\\ipykernel_6700\\169566949.py
+    # Matches paths like /tmp/ipykernel_<pid>/<hash>.py or C:\\Users\\...\\ipykernel_<pid>\\<hash>.py
+    return re.match(r".*[/\\]ipykernel_\d+[/\\]\d+\.py", normalized_path) is not None
 
 
 def init_notebook() -> None:
