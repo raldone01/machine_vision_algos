@@ -48,7 +48,15 @@ Find it here [`rd_vec_v4_dibit.py`](python/canny/canny_impls/rd_vec_v4_dibit.py)
 
 * Benchmark notebook: Add system information like gpu, cpu, ram, ...
 
+## Contributions
+
+Contributions are welcome!
+Open an issue before working on something big or complex.
+
 ## Usage as teaching material
 
 Feel free to use anything in this repository as teaching materials.
 If you do, I would love to be mentioned as a source.
+An email informing me would also be appreciated.
+
+Thank you.

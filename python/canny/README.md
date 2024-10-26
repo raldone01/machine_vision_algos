@@ -8,4 +8,4 @@
 
 [`canny_benchmark.ipynb`](canny_benchmark.ipynb)
 
-![canny_benchmark preview results](./benchmark_output/circle_128.png.png)
+![canny_benchmark preview results](./benchmark_output/circle_128.png)
