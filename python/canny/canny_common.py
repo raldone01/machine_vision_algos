@@ -6,7 +6,7 @@ from ipywidgets import Layout
 
 import cv2
 
-from utils.benchmarking import time_line
+from utils.benchmarking import LogTimer
 
 
 def load_input_images(input_images_folder) -> list:
@@ -19,9 +19,9 @@ def load_input_images(input_images_folder) -> list:
 
     input_images = []
 
-    with time_line(f"Loading {len(input_image_files)} images"):
+    with LogTimer(f"Loading {len(input_image_files)} images"):
         for image_filename in input_image_files:
-            with time_line(f"Loading {image_filename}"):
+            with LogTimer(f"Loading {image_filename}"):
                 input_image = mock.Mock()
 
                 input_image.filename = image_filename

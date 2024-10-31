@@ -119,40 +119,86 @@ def time_function(log_before: bool = True, log_func=None):
 
     return decorator
 
+class LogTimer:
+    _start_time_ns: int
+    _end_time_ns: int
 
-@contextmanager
-def time_line(description: str = "Code", log_before: bool = True, log_func=None):
-    # Get the current stack frame to determine where the with statement was called
-    frame_info = inspect.stack()[2]
+    _total_time_ns: int = 0
 
-    source_file = frame_info.filename
-    line_number = frame_info.lineno
+    _threshold_ns: int = 0
 
-    debug_info = _get_debug_info_string(source_file, line_number)
+    _description: str = "Code"
 
-    if log_func is None:
-        log_func = _default_log_func
+    def __init__(self, description: str = "Code", threshold_ns: int = 0, log_func=None):
+        self._description = description
+        self._threshold_ns = threshold_ns
+        if log_func is not None:
+            self._log_func = log_func
+        else:
+            self._log_func = _default_log_func
 
-    if log_before:
-        log_func(f"{Fore.BLACK}{description} {Style.RESET_ALL}started {debug_info}")
+        self._start_time_ns = perf_counter_ns()
 
-    # Start timing
-    ts = perf_counter_ns()
+    def _get_debug_info_string(self) -> str:
+        # Get the current stack frame to determine where the with statement was called
+        frame_info = inspect.stack()[3]
 
-    # Execute the block
-    yield
+        source_file = frame_info.filename
+        line_number = frame_info.lineno
 
-    # End timing
-    te = perf_counter_ns()
+        return _get_debug_info_string(source_file, line_number)
 
-    elapsed_ns = te - ts
+    def set_threshold_ns(self, threshold_ns: int):
+        self._threshold_ns = threshold_ns
 
-    # Log in standard editor format with colors if available: filename and line_number
-    log_func(
-        f"{Fore.BLACK}{description} {Style.RESET_ALL}took: "
-        f"{format_time_ns(elapsed_ns)} "
-        f"{debug_info}"
-    )
+    def start(self, log_before: bool = True):
+        self._start_time_ns = perf_counter_ns()
+
+        if log_before:
+            self._log_func(
+                f"{Fore.BLACK}{self._description} {Style.RESET_ALL}started {self._get_debug_info_string()}"
+            )
+
+    def stop(self):
+        self._end_time_ns = perf_counter_ns()
+        elapsed_ns = self._end_time_ns - self._start_time_ns
+        self._total_time_ns += elapsed_ns
+
+        if self._threshold_ns == 0:
+            self._log_func(
+                f"{Fore.BLACK}{self._description} {Style.RESET_ALL}took: "
+                f"{format_time_ns(elapsed_ns)} "
+                f"{self._get_debug_info_string()}"
+            )
+            return
+
+        if self._threshold_ns < elapsed_ns:
+            self._log_func(
+                f"{Fore.BLACK}{self._description} {Style.RESET_ALL}exceeded threshold of "
+                f"{format_time_ns(self._threshold_ns)}: took: "
+                f"{format_time_ns(elapsed_ns)} "
+                f"{self._get_debug_info_string()}"
+            )
+
+    def log_total_time(self):
+        self._log_func(
+            f"{Fore.BLACK}{self._description} {Style.RESET_ALL}took: "
+            f"{format_time_ns(self._total_time_ns)} in total"
+            f"{self._get_debug_info_string()}"
+        )
+
+    def get_total_time_ns(self):
+        return self._total_time_ns
+
+    def reset_total_time(self):
+        self._total_time_ns = 0
+
+    def __enter__(self, log_before: bool = True):
+        self.start(log_before)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.stop()
 
 
 @dataclass

@@ -4,7 +4,7 @@ import os
 from importlib import reload
 from pathlib import Path
 
-from utils.benchmarking import time_line
+from utils.benchmarking import LogTimer
 
 
 def get_module_name_from_file_path(file_path: str):
@@ -21,13 +21,13 @@ def load_module(file_path: str):
 
     already_loaded = module_name in sys.modules
     if already_loaded:
-        with time_line(f"Reloading {module_name}"):
+        with LogTimer(f"Reloading {module_name}"):
             module = sys.modules[module_name]
             reload(module)
         assert module.__name__ == module_name
         return module
 
-    with time_line(f"Loading {module_name}"):
+    with LogTimer(f"Loading {module_name}"):
         folder = str(Path(file_path).parent)
         if folder not in sys.path:
             sys.path.append(folder)
@@ -46,7 +46,7 @@ def load_modules(folder_path: str) -> list[str]:
 
     module_names = []
 
-    with time_line(f"Loading {len(module_file_paths)} modules"):
+    with LogTimer(f"Loading {len(module_file_paths)} modules"):
         for image_filename in module_file_paths:
             full_path = Path(folder_path) / image_filename
             module = load_module(full_path)
