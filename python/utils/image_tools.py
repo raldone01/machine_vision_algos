@@ -1,5 +1,10 @@
+from dataclasses import astuple, dataclass
+from pathlib import Path
+
 import cv2
 import numpy as np
+
+from utils.benchmarking import LogTimer
 
 
 def add_gaussian_noise(
@@ -19,12 +24,52 @@ def add_gaussian_noise(
     :return: Image with added noise
     :rtype: np.array with shape (height, width) with dtype = np.float32 and values in the range [0., 1.]
     """
-    noisy_img = image_i.copy()
-
-    noise = sigma * np.random.randn(*noisy_img.shape) + mean
-    noisy_img += noise
+    noise = sigma * np.random.randn(*image_i.shape) + mean
+    noisy_img = image_i + noise
     cv2.normalize(noisy_img, noisy_img, 0, 1, cv2.NORM_MINMAX, cv2.CV_32F)
 
     # Sometimes values are outside of limits due to rounding errors. Cut those values:
     np.clip(noisy_img, 0.0, 1.0, out=noisy_img)
     return noisy_img
+
+
+@dataclass
+class LoadedImage:
+    filename: str = ""
+    filepath: Path = None
+    image_color: np.array = None
+    image_gray: np.array = None
+
+    def __iter__(self):
+        return iter(astuple(self))
+
+    def __str__(self):
+        return (
+            f"LoadedImage(filename={self.filename}, "
+            f"filepath={self.filepath}, "
+            f"image_color.shape={self.image_color.shape}, "
+            f"image_gray.shape={self.image_gray.shape})"
+        )
+
+
+def load_image(image_path: Path) -> LoadedImage:
+    """Loads an image from the specified path and returns it as a LoadedImage object
+
+    :param image_path: Path to the image file
+    :type image_path: Path
+
+    :return: LoadedImage object with the loaded image
+    :rtype: LoadedImage
+    """
+
+    # Convert image_path to a Path object if it is a string
+    if isinstance(image_path, str):
+        image_path = Path(image_path)
+
+    with LogTimer(f"Loading {image_path.name}"):
+        image = LoadedImage()
+        image.filename = image_path.name
+        image.filepath = image_path
+        image.image_color = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        image.image_gray = cv2.cvtColor(image.image_color, cv2.COLOR_BGR2GRAY)
+    return image

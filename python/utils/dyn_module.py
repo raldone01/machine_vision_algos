@@ -3,8 +3,10 @@ import sys
 import os
 from importlib import reload
 from pathlib import Path
+import logging
 
 from utils.benchmarking import LogTimer
+from utils.cuda_tools import has_cuda
 
 
 def get_module_name_from_file_path(file_path: str):
@@ -43,6 +45,14 @@ def load_module(file_path: str):
 def load_modules(folder_path: str) -> list[str]:
     module_file_paths = [f for f in os.listdir(folder_path) if str(f).endswith(".py")]
     module_file_paths.sort()
+
+    if not has_cuda():
+        for module_file in module_file_paths:
+            if "cuda" in module_file:
+                module_file_paths.remove(module_file)
+                logging.warning(
+                    f"Skipping loading of {module_file} because CUDA is not available"
+                )
 
     module_names = []
 

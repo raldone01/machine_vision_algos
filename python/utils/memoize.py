@@ -50,18 +50,22 @@ def _create_value(value):
     return val
 
 
-def get(key: str, default):
+def get(key: str, default, possible_values=None):
     global memoize_shelve
     if key in memoize_shelve:
         value = memoize_shelve[key]
         value.access_count += 1
         value.last_read = time.time()
         memoize_shelve[key] = value
+
+        if possible_values is not None and value.value not in possible_values:
+            # load the default value
+            set(key, default)
+            return default
+
         return value.value
     else:
-        value = _create_value(default)
-        memoize_shelve[key] = value
-        memoize_shelve.sync()
+        set(key, default)
         return default
 
 
