@@ -47,6 +47,7 @@ Find it here [`rd_vec_v4_dibit.py`](python/canny/canny_impls/rd_vec_v4_dibit.py)
 ## TODO
 
 * Benchmark notebook: Add system information like gpu, cpu, ram, ...
+* Visualize gauss radius outline for sigma sliders
 
 ## Contributions
 

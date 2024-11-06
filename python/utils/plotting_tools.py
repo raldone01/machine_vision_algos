@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import cv2
 import numpy as np
 from PIL import Image as PILImage
-from IPython.display import Image
+from IPython.display import Image, display
 from ipywidgets import widgets
 from icecream import ic
 
@@ -61,6 +61,12 @@ class SmartFigure:
 
     def get_fig(self):
         return self.fig
+
+    def display_as_image(self):
+        f = BytesIO()
+        format = "png"
+        self.fig.savefig(f, format=format)
+        display(Image(data=f.getvalue(), format=format))
 
     def __del__(self):
         global open_cnt

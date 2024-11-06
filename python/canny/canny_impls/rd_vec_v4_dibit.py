@@ -16,8 +16,8 @@ def _convert_to_float(image_u8_i: np.array) -> np.array:
 
 
 def gaussian_kernel(sigma: float) -> np.array:
-    # kernel_width = 2 * one_dir + 1
     kernel_width_half = np.ceil(3 * sigma)
+    # kernel_width = 2 * kernel_width_half + 1
 
     # Create a 2D grid of indices
     idx = np.arange(-kernel_width_half, kernel_width_half + 1)
