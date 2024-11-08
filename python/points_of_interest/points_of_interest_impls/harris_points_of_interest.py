@@ -4,6 +4,7 @@ import cv2
 from utils.plotting_tools import SmartFigure, plot_matrix, plot_kernel
 from IPython.display import display
 from icecream import ic
+from numpy.lib.stride_tricks import sliding_window_view
 
 
 def _convert_to_float(image_u8_i: np.array) -> np.array:
@@ -190,7 +191,7 @@ def harris_corner(
 
 
 def compute_descriptors(
-    image_i: np.ndarray, keypoints: list[cv2.KeyPoint], patch_size: int
+    image_i: np.ndarray, keypoints_i: list[cv2.KeyPoint], patch_size: int
 ) -> tuple[list[cv2.KeyPoint], np.ndarray]:
     """Calculate a descriptor on patches of the image, centred on the locations of the KeyPoints.
 
@@ -217,8 +218,41 @@ def compute_descriptors(
             The descriptor at row i belongs to the KeyPoint at filtered_keypoints[i]
     :rtype: (List[cv2.KeyPoint], np.ndarray)
     """
-    filtered_keypoints = keypoints
-    descriptors = np.zeros(shape=(len(keypoints), patch_size**2))
+    window = sliding_window_view(image_i, (patch_size, patch_size))
+
+    keypoints_coords = np.array([kp.pt for kp in keypoints_i], dtype=np.int32)
+    keypoints_x, keypoints_y = keypoints_coords[:, 0], keypoints_coords[:, 1]
+
+    # compute the window indices for the keypoints
+    patch_size_half = patch_size // 2
+    keypoints_window_x = keypoints_x - patch_size_half
+    keypoints_window_y = keypoints_y - patch_size_half
+
+    # compute the keypoint mask
+    # left
+    keypoint_mask = keypoints_window_x >= 0
+    # right
+    keypoint_mask &= keypoints_window_x < window.shape[1]
+    # top
+    keypoint_mask &= keypoints_window_y >= 0
+    # bottom
+    keypoint_mask &= keypoints_window_y < window.shape[0]
+
+    # filter out the keypoints that are too close to the border
+    descriptors = window[
+        keypoints_window_y[keypoint_mask], keypoints_window_x[keypoint_mask]
+    ].reshape(-1, patch_size**2)
+    filtered_keypoints = [kp for kp, mask in zip(keypoints_i, keypoint_mask) if mask]
+
+    # assert that the shape of the descriptors is correct
+    assert descriptors.shape == (len(filtered_keypoints), patch_size**2)
+
+    # sort the values in the descriptors
+    descriptors = np.sort(descriptors, axis=1)  # seems to work a little better
+
+    # normalize the descriptors
+    # descriptors = descriptors - np.max(descriptors, axis=1)[:, None]
+    # descriptors = descriptors / np.linalg.norm(descriptors, axis=1)[:, None]
 
     return filtered_keypoints, descriptors
 
@@ -246,6 +280,96 @@ def filter_matches(matches: tuple[tuple[cv2.DMatch]]) -> list[cv2.DMatch]:
     :return filtered_matches: A list of all matches that fulfill the Low Distance Ratio Condition
     :rtype: List[cv2.DMatch]
     """
-    filtered_matches = [m[0] for m in matches]
+    # d_a = np.array([m[0].distance for m in matches])
+    # d_b = np.array([m[1].distance for m in matches])
+
+    matches = np.array(matches)
+    d_a, d_b = np.array([(m[0].distance, m[1].distance) for m in matches]).T
+
+    # perform the Lowe Distance Ratio Test
+    ratio = 0.8
+    mask = d_a < ratio * d_b
+
+    filtered_matches = matches[mask, 0]
 
     return filtered_matches
+
+
+def find_homography_leastsquares(
+    source_points: np.ndarray,
+    target_points: np.ndarray,
+    confidence: float = None,
+    inlier_threshold: float = None,
+) -> np.ndarray:
+    """Return projective transformation matrix of source_points in the target image given matching points
+
+    Return the projective transformation matrix for homogeneous coordinates. It uses the Least-Squares algorithm to
+    minimize the back-projection error with all points provided. Requires at least 4 matching points.
+
+    :param source_points: Array of points. Each row holds one point from the source image (object image) as [x, y]
+    :type source_points: np.ndarray with shape (n, 2)
+
+    :param target_points: Array of points. Each row holds one point from the target image (scene image) as [x, y].
+    :type target_points: np.ndarray with shape (n, 2)
+
+    :return: The projective transformation matrix for homogeneous coordinates with shape (3, 3)
+    :rtype: np.ndarray with shape (3, 3)
+    """
+    assert source_points.shape == target_points.shape
+
+    n = source_points.shape[0]
+    assert n >= 4
+
+    # create the A matrix
+    A = np.empty((2 * n, 8), dtype=np.float64)
+    for i in range(n):
+        x, y = source_points[i]
+        x_p, y_p = target_points[i]
+        A[2 * i] = np.array([x, y, 1, 0, 0, 0, -x * x_p, -y * x_p])
+        A[2 * i + 1] = np.array([0, 0, 0, x, y, 1, -x * y_p, -y * y_p])
+
+    # solve with np.linalg.lstsq
+    b = target_points.flatten()
+    homography_reduced = np.linalg.lstsq(A, b, rcond=None)[0]
+
+    # we need to add back h22
+    homography = np.append(homography_reduced, 1).reshape(3, 3)
+
+    return homography
+
+
+def find_homography_ransac(
+    source_points: np.ndarray,
+    target_points: np.ndarray,
+    confidence: float,
+    inlier_threshold: float,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Return estimated transformation matrix of source_points in the target image given matching points
+
+    Return the projective transformation matrix for homogeneous coordinates. It uses the RANSAC algorithm with the
+    Least-Squares algorithm to minimize the back-projection error and be robust against outliers.
+    Requires at least 4 matching points.
+
+    :param source_points: Array of points. Each row holds one point from the source (object) image [x, y]
+    :type source_points: np.ndarray with shape (n, 2)
+
+    :param target_points: Array of points. Each row holds one point from the target (scene) image [x, y].
+    :type target_points: np.ndarray with shape (n, 2)
+
+    :param confidence: Solution Confidence (in percent): Likelihood of all sampled points being inliers.
+    :type confidence: float
+
+    :param inlier_threshold: Max. Euclidean distance of a point from the transformed point to be considered an inlier
+    :type inlier_threshold: float
+
+    :return: (homography, inliers, num_iterations)
+        homography: The projective transformation matrix for homogeneous coordinates with shape (3, 3)
+        inliers: Is True if the point at the index is an inlier. Boolean array with shape (n,)
+        num_iterations: The number of iterations that were needed for the sample consensus
+    :rtype: Tuple[np.ndarray, np.ndarray, int]
+    """
+    best_suggested_homography = np.eye(3)
+    best_inliers = np.full(shape=len(target_points), fill_value=True, dtype=bool)
+    num_iterations = 0
+
+    return best_suggested_homography, best_inliers, num_iterations

@@ -76,5 +76,5 @@ def draw_matches(
         matches,
         None,
         matchesThickness=thickness,
-        # flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
+        flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
     )
