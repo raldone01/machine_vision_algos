@@ -75,6 +75,6 @@ def draw_matches(
         keypoints_2,
         matches,
         None,
-        matchesThickness=thickness,
+        matchesThickness=max(thickness // 2, 1),
         flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
     )

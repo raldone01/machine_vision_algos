@@ -144,11 +144,18 @@ def plot_image(ax, image_buf_i, longest_side=None, upscale: bool = False):
 
 
 def to_ipy_image(
-    image_buf_i, fmt="png", longest_side=None, use_widget=True, upscale: bool = False
+    image_buf_i,
+    fmt="png",
+    longest_side=None,
+    use_widget=True,
+    upscale: bool = False,
+    set_dimensions=False,
 ):
     image_buf_o, is_color = _prepare_image_buf(image_buf_i, longest_side, upscale)
 
     image_buf_o = (image_buf_o * 255).astype(np.uint8)
+
+    height, width = image_buf_o.shape[:2]
 
     f = BytesIO()
     pil_image = PILImage.fromarray(image_buf_o, "RGB" if is_color else "L")
@@ -156,7 +163,11 @@ def to_ipy_image(
     pil_image.save(f, fmt)
 
     if use_widget:
-        return widgets.Image(value=f.getvalue(), format=fmt)
+        if set_dimensions:
+            dimen = {"width": width, "height": height}
+        else:
+            dimen = {}
+        return widgets.Image(value=f.getvalue(), format=fmt, **dimen)
     else:
         return Image(data=f.getvalue())
 

@@ -9,27 +9,52 @@ widgets_styling = {
 }
 
 
-class ManyBoxes:
-    def __init__(self, all_choices: list[str], default_choices: list[str] = None):
+class MultiSelect:
+    def __init__(
+        self,
+        all_choices: list[str],
+        default_choices: list[str] = None,
+        custom_widgets: list[wid.Widget] = None,
+        grid_template_columns: str = "1fr 1fr",
+    ):
         self._choices = all_choices
         self._on_selection_change = None
+        self._custom_widgets = custom_widgets or [None] * len(all_choices)
+
+        if len(self._custom_widgets) != len(self._choices):
+            raise ValueError(
+                "The number of custom widgets must match the number of choices"
+            )
 
         self._checkboxes = [
             wid.Checkbox(description=choice, value=True, layout=Layout(width="auto"))
             for choice in all_choices
         ]
+
         for checkbox in self._checkboxes:
             checkbox.observe(self._on_checkbox_change, "value")
 
         self._select_all_button = wid.Button()
         self._configure_button()
 
+        # Process selection state for default choices
         self.select(default_choices or [])
 
+        # Build widgets: Checkbox + Custom widget (if any)
+        children = [self._select_all_button]  # Include the button first
+        for checkbox, custom_widget in zip(self._checkboxes, self._custom_widgets):
+            if custom_widget:
+                # Add checkbox followed by its related custom widget
+                children.extend([wid.VBox([checkbox, custom_widget])])
+            else:
+                # Just add the checkbox
+                children.append(checkbox)
+
         self._view = wid.GridBox(
-            children=[self._select_all_button, *self._checkboxes],
+            children=children,
             layout=wid.Layout(
-                grid_template_columns="1fr 1fr 1fr 1fr",
+                grid_template_columns=grid_template_columns,
+                grid_gap="10px",
             ),
         )
 
@@ -56,7 +81,6 @@ class ManyBoxes:
 
     def _on_checkbox_change(self, _) -> None:
         self._configure_button()
-
         if self._on_selection_change:
             self._on_selection_change()
 
@@ -70,6 +94,92 @@ class ManyBoxes:
 
     def get_selected(self) -> list[str]:
         return [checkbox.description for checkbox in self._checkboxes if checkbox.value]
+
+
+class RadioSelect:
+    def __init__(
+        self,
+        all_choices: list[str],
+        default_choice: str = None,
+        custom_widgets: list[wid.Widget] = None,
+        grid_template_columns: str = "1fr 1fr",
+    ):
+        self._choices = all_choices
+        self._on_selection_change = None
+        self._custom_widgets = custom_widgets or [None] * len(all_choices)
+
+        if len(self._custom_widgets) != len(self._choices):
+            raise ValueError(
+                "The number of custom widgets must match the number of choices"
+            )
+
+        self._radio_buttons = [
+            wid.RadioButtons(options=[choice], layout=Layout(width="max-content"))
+            for choice in all_choices
+        ]
+
+        # Process selection state for the default choice
+        self._select(default_choice)
+
+        for radio_button in self._radio_buttons:
+            radio_button.observe(
+                lambda change, radio_button=radio_button: self._on_radio_button_change(
+                    radio_button
+                ),
+                "value",
+            )
+
+        # Build widgets: RadioButtons + Custom widget (if any)
+        children = []
+        for radio_button, custom_widget in zip(
+            self._radio_buttons, self._custom_widgets
+        ):
+            if custom_widget:
+                # Add a radio button followed by its related custom widget
+                children.extend([wid.VBox([radio_button, custom_widget])])
+            else:
+                # Just add the radio button
+                children.append(radio_button)
+
+        self._view = wid.GridBox(
+            children=children,
+            layout=wid.Layout(
+                grid_template_columns=grid_template_columns,
+                grid_gap="10px",
+            ),
+        )
+
+    def set_on_selection_change(self, callback) -> None:
+        self._on_selection_change = callback
+
+    def get_view(self) -> wid.GridBox:
+        return self._view
+
+    def _on_radio_button_change(self, radio_button) -> None:
+        if radio_button.index is None:
+            return
+
+        # make sure that only one radio button is selected
+        for other_radio_button in self._radio_buttons:
+            if other_radio_button != radio_button:
+                other_radio_button.index = None
+
+        if self._on_selection_change:
+            self._on_selection_change()
+
+    def _select(self, choice: str) -> None:
+        for radio_button in self._radio_buttons:
+            radio_button.index = 0 if radio_button.options[0] == choice else None
+
+    def select(self, choice: str) -> None:
+        self._select(choice)
+        if self._on_selection_change:
+            self._on_selection_change()
+
+    def get_selected(self) -> str:
+        for radio_button in self._radio_buttons:
+            if radio_button.index == 0:
+                return radio_button.options[0]
 
 
 class CenteredColumn:

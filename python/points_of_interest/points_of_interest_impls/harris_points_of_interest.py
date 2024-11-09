@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import numpy as np
 import cv2
 
@@ -257,14 +258,18 @@ def compute_descriptors(
     return filtered_keypoints, descriptors
 
 
-def flann_matches(
-    descriptors1: np.ndarray, descriptors2: np.ndarray
-) -> list[cv2.DMatch]:
+def _setup_flann():
     # FLANN (Fast Library for Approximate Nearest Neighbors) parameters
     FLANN_INDEX_KDTREE = 1
     index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
     search_params = dict(checks=50)  # or pass empty dictionary
-    flann = cv2.FlannBasedMatcher(index_params, search_params)
+    return cv2.FlannBasedMatcher(index_params, search_params)
+
+
+def flann_matches(
+    descriptors1: np.ndarray, descriptors2: np.ndarray
+) -> list[cv2.DMatch]:
+    flann = _setup_flann()
     matches = flann.knnMatch(
         descriptors1.astype(np.float32), descriptors2.astype(np.float32), k=2
     )
@@ -295,16 +300,16 @@ def filter_matches(matches: tuple[tuple[cv2.DMatch]]) -> list[cv2.DMatch]:
     return filtered_matches
 
 
-def find_homography_leastsquares(
+def find_homography_eq(
     source_points: np.ndarray,
     target_points: np.ndarray,
     confidence: float = None,
     inlier_threshold: float = None,
+    use_svd: bool = False,
 ) -> np.ndarray:
     """Return projective transformation matrix of source_points in the target image given matching points
 
-    Return the projective transformation matrix for homogeneous coordinates. It uses the Least-Squares algorithm to
-    minimize the back-projection error with all points provided. Requires at least 4 matching points.
+    Return the projective transformation matrix for homogeneous coordinates. Requires at least 4 matching points.
 
     :param source_points: Array of points. Each row holds one point from the source image (object image) as [x, y]
     :type source_points: np.ndarray with shape (n, 2)
@@ -320,30 +325,55 @@ def find_homography_leastsquares(
     n = source_points.shape[0]
     assert n >= 4
 
-    # create the A matrix
-    A = np.empty((2 * n, 8), dtype=np.float64)
+    if not use_svd:
+        # create the A matrix
+        A = np.empty((2 * n, 8), dtype=np.float64)
+        for i in range(n):
+            x, y = source_points[i]
+            x_p, y_p = target_points[i]
+            A[2 * i] = np.array([x, y, 1, 0, 0, 0, -x * x_p, -y * x_p])
+            A[2 * i + 1] = np.array([0, 0, 0, x, y, 1, -x * y_p, -y * y_p])
+
+        # solve with np.linalg.lstsq
+        b = target_points.flatten()
+        homography_reduced = np.linalg.lstsq(A, b, rcond=None)[0]
+
+        # we need to add back h22
+        homography = np.append(homography_reduced, 1).reshape(3, 3)
+
+        return homography
+
+    # use SVD
+    A = np.empty((2 * n, 9), dtype=np.float64)
     for i in range(n):
         x, y = source_points[i]
         x_p, y_p = target_points[i]
-        A[2 * i] = np.array([x, y, 1, 0, 0, 0, -x * x_p, -y * x_p])
-        A[2 * i + 1] = np.array([0, 0, 0, x, y, 1, -x * y_p, -y * y_p])
+        A[2 * i] = np.array([x, y, 1, 0, 0, 0, -x * x_p, -y * x_p, -x_p])
+        A[2 * i + 1] = np.array([0, 0, 0, x, y, 1, -x * y_p, -y * y_p, -y_p])
 
-    # solve with np.linalg.lstsq
-    b = target_points.flatten()
-    homography_reduced = np.linalg.lstsq(A, b, rcond=None)[0]
-
-    # we need to add back h22
-    homography = np.append(homography_reduced, 1).reshape(3, 3)
+    _, _, V = np.linalg.svd(A)
+    homography = V[-1].reshape(3, 3)
 
     return homography
 
 
-def find_homography_ransac(
+@dataclass
+class FindHomographyResult:
+    homography: np.ndarray
+    # debug_inliers is and array of bools, where True means that the point at the index is an inlier
+    # It may be None if the inliers are not calculated
+    debug_inliers: np.ndarray
+    # num_iterations is the number of iterations that were needed for the sample consensus
+    # It may be None depending on the implementation
+    num_iterations: int
+
+
+def _find_homography(
     source_points: np.ndarray,
     target_points: np.ndarray,
     confidence: float,
     inlier_threshold: float,
-) -> tuple[np.ndarray, np.ndarray, int]:
+) -> FindHomographyResult:
     """Return estimated transformation matrix of source_points in the target image given matching points
 
     Return the projective transformation matrix for homogeneous coordinates. It uses the RANSAC algorithm with the
@@ -372,4 +402,51 @@ def find_homography_ransac(
     best_inliers = np.full(shape=len(target_points), fill_value=True, dtype=bool)
     num_iterations = 0
 
-    return best_suggested_homography, best_inliers, num_iterations
+    return FindHomographyResult(best_suggested_homography, best_inliers, num_iterations)
+
+
+@dataclass
+class ObjectRecognitionResult:
+    detected_objects_keypoints: list[list[cv2.KeyPoint]]
+    detected_objects_descriptors: list[np.array]
+    detected_scenes_keypoints: list[list[cv2.KeyPoint]]
+    detected_scenes_descriptors: list[np.array]
+    object_scene_matches: list[list[cv2.DMatch]]
+
+
+def run_object_recognition(
+    object_images_u8_i: np.array,
+    scene_images_u8_i: np.array,
+) -> ObjectRecognitionResult:
+    sift = cv2.SIFT_create()
+
+    object_keypoints = []
+    object_descriptors = []
+    for object_image in object_images_u8_i:
+        keypoints, descriptors = sift.detectAndCompute(object_image, None)
+        object_keypoints.append(keypoints)
+        object_descriptors.append(descriptors)
+
+    scene_keypoints = []
+    scene_descriptors = []
+    for scene_image in scene_images_u8_i:
+        keypoints, descriptors = sift.detectAndCompute(scene_image, None)
+        scene_keypoints.append(keypoints)
+        scene_descriptors.append(descriptors)
+
+    object_scene_matches = []
+    for object_descriptor in object_descriptors:
+        object_matches = []
+        for scene_descriptor in scene_descriptors:
+            matches = flann_matches(object_descriptor, scene_descriptor)
+            matches = filter_matches(matches)
+            object_matches.append(matches)
+        object_scene_matches.append(object_matches)
+
+    return ObjectRecognitionResult(
+        object_keypoints,
+        object_descriptors,
+        scene_keypoints,
+        scene_descriptors,
+        object_scene_matches,
+    )
