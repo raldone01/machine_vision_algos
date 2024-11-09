@@ -50,7 +50,7 @@ def _create_value(value):
     return val
 
 
-def get(key: str, default, possible_values=None):
+def get(key: str, default, possible_values=None, multi_value=False):
     global memoize_shelve
     if key in memoize_shelve:
         value = memoize_shelve[key]
@@ -58,10 +58,15 @@ def get(key: str, default, possible_values=None):
         value.last_read = time.time()
         memoize_shelve[key] = value
 
-        if possible_values is not None and value.value not in possible_values:
-            # load the default value
-            set(key, default)
-            return default
+        if not multi_value:
+            if possible_values is not None and value.value not in possible_values:
+                set(key, default)
+                return default
+        else:
+            # Check if all values are in possible_values
+            if not all(v in possible_values for v in value.value):
+                set(key, default)
+                return default
 
         return value.value
     else:

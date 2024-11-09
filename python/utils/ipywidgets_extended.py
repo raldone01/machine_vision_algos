@@ -31,14 +31,14 @@ class MultiSelect:
             for choice in all_choices
         ]
 
+        # Process selection state for default choices
+        self.select(default_choices or [])
+
         for checkbox in self._checkboxes:
             checkbox.observe(self._on_checkbox_change, "value")
 
         self._select_all_button = wid.Button()
         self._configure_button()
-
-        # Process selection state for default choices
-        self.select(default_choices or [])
 
         # Build widgets: Checkbox + Custom widget (if any)
         children = [self._select_all_button]  # Include the button first
@@ -86,7 +86,11 @@ class MultiSelect:
 
     def select_all(self, value: bool) -> None:
         for checkbox in self._checkboxes:
+            checkbox.unobserve(self._on_checkbox_change, "value")
             checkbox.value = value
+            checkbox.observe(self._on_checkbox_change, "value")
+        if self._on_selection_change:
+            self._on_selection_change()
 
     def select(self, choices: list[str]) -> None:
         for checkbox in self._checkboxes:
