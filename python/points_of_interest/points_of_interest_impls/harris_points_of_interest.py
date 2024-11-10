@@ -249,7 +249,7 @@ def compute_descriptors(
     assert descriptors.shape == (len(filtered_keypoints), patch_size**2)
 
     # sort the values in the descriptors
-    descriptors = np.sort(descriptors, axis=1)  # seems to work a little better
+    # descriptors = np.sort(descriptors, axis=1)  # sorting like that just looses information
 
     # normalize the descriptors
     # descriptors = descriptors - np.max(descriptors, axis=1)[:, None]
@@ -300,13 +300,25 @@ def filter_matches(matches: tuple[tuple[cv2.DMatch]]) -> list[cv2.DMatch]:
     return filtered_matches
 
 
+@dataclass
+class FindHomographyResult:
+    homography: np.ndarray
+    # debug_inliers is and array of bools, where True means that the point at the index is an inlier
+    # It may be None if the inliers are not calculated
+    debug_inliers: np.ndarray
+    # num_iterations is the number of iterations that were needed for the sample consensus
+    # It may be None depending on the implementation
+    num_iterations: int
+    debug_chosen_source_points: np.ndarray = None
+
+
 def find_homography_eq(
     source_points: np.ndarray,
     target_points: np.ndarray,
     confidence: float = None,
     inlier_threshold: float = None,
     use_svd: bool = False,
-) -> np.ndarray:
+) -> FindHomographyResult:
     """Return projective transformation matrix of source_points in the target image given matching points
 
     Return the projective transformation matrix for homogeneous coordinates. Requires at least 4 matching points.
@@ -341,7 +353,7 @@ def find_homography_eq(
         # we need to add back h22
         homography = np.append(homography_reduced, 1).reshape(3, 3)
 
-        return homography
+        return FindHomographyResult(homography, None, None)
 
     # use SVD
     A = np.empty((2 * n, 9), dtype=np.float64)
@@ -354,21 +366,74 @@ def find_homography_eq(
     _, _, V = np.linalg.svd(A)
     homography = V[-1].reshape(3, 3)
 
-    return homography
+    return FindHomographyResult(homography, None, None)
+
+
+def apply_homography(homography: np.ndarray, points: np.ndarray) -> np.ndarray:
+    points_homog = np.hstack(
+        [points, np.ones((points.shape[0], 1))]
+    )  # Convert to homogeneous coordinates
+    transformed_points = homography @ points_homog.T
+    transformed_points /= transformed_points[
+        2, :
+    ]  # Normalize by the third (homogeneous) coordinate
+    return transformed_points[:2, :].T  # Return x, y coordinates
 
 
 @dataclass
-class FindHomographyResult:
-    homography: np.ndarray
-    # debug_inliers is and array of bools, where True means that the point at the index is an inlier
-    # It may be None if the inliers are not calculated
-    debug_inliers: np.ndarray
-    # num_iterations is the number of iterations that were needed for the sample consensus
-    # It may be None depending on the implementation
-    num_iterations: int
+class HomographyDistortion:
+    aspect_ratio_change: float
+    angle_distortion: list[float]
+    area_change: float
 
 
-def _find_homography(
+def calculate_homography_distortion(homography, rectangle) -> HomographyDistortion:
+    """Calculate distortion metrics given a homography matrix H and a rectangle's corner points."""
+    # Original aspect ratio
+    w, h = (
+        np.linalg.norm(rectangle[1] - rectangle[0]),
+        np.linalg.norm(rectangle[2] - rectangle[1]),
+    )
+    original_aspect_ratio = w / h
+
+    # Apply homography
+    transformed_corners = apply_homography(homography, rectangle)
+
+    # Transformed aspect ratio
+    tw, th = (
+        np.linalg.norm(transformed_corners[1] - transformed_corners[0]),
+        np.linalg.norm(transformed_corners[2] - transformed_corners[1]),
+    )
+    transformed_aspect_ratio = tw / th
+
+    # Angle distortion
+    def angle(v1, v2):
+        cos_theta = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+        return np.degrees(np.arccos(np.clip(cos_theta, -1.0, 1.0)))
+
+    angles = []
+    for i in range(4):
+        v1 = transformed_corners[(i + 1) % 4] - transformed_corners[i]
+        v2 = transformed_corners[(i - 1) % 4] - transformed_corners[i]
+        angles.append(angle(v1, v2))
+
+    # Area change
+    area_original = w * h
+    area_transformed = abs(
+        np.cross(
+            transformed_corners[1] - transformed_corners[0],
+            transformed_corners[3] - transformed_corners[0],
+        )
+    )
+
+    return HomographyDistortion(
+        aspect_ratio_change=transformed_aspect_ratio / original_aspect_ratio,
+        angle_distortion=[abs(90 - a) for a in angles],  # Deviation from 90 degrees
+        area_change=area_transformed / area_original,
+    )
+
+
+def find_homography_ransac(
     source_points: np.ndarray,
     target_points: np.ndarray,
     confidence: float,
@@ -398,11 +463,105 @@ def _find_homography(
         num_iterations: The number of iterations that were needed for the sample consensus
     :rtype: Tuple[np.ndarray, np.ndarray, int]
     """
-    best_suggested_homography = np.eye(3)
-    best_inliers = np.full(shape=len(target_points), fill_value=True, dtype=bool)
-    num_iterations = 0
+    rng = np.random.default_rng(12345)
 
-    return FindHomographyResult(best_suggested_homography, best_inliers, num_iterations)
+    # empirical value for the minimum number of inliers
+    min_required_inlier_count = 8
+
+    # calculate the number of iterations based on the confidence
+    number_of_points = source_points.shape[0]
+    number_of_model_points = 4
+
+    if number_of_points < number_of_model_points:
+        return FindHomographyResult(
+            None,
+            np.full(len(target_points), fill_value=False, dtype=bool),
+            0,
+        )
+
+    number_of_iterations_float = (
+        np.log(1 - confidence)
+        / np.log(
+            1
+            - number_of_model_points
+            / number_of_points
+            * (number_of_model_points - 1)
+            / (number_of_points - 1)
+        )
+        * 2
+    )
+
+    number_of_iterations = int(number_of_iterations_float)
+
+    best_inlier_count = 0
+    best_inliers = np.full(len(target_points), fill_value=False, dtype=bool)
+    best_error = np.inf
+    debug_chosen_source_points = np.full((0, 2), fill_value=np.nan)
+
+    for _ in range(number_of_iterations):
+        # 1. Sample four unique matches randomly
+        random_indices = rng.choice(
+            number_of_points, size=number_of_model_points, replace=False
+        )
+
+        random_source_points = source_points[random_indices]
+        random_target_points = target_points[random_indices]
+
+        # 2. Use find_homography_eq to calculate the homography
+        homography = find_homography_eq(
+            random_source_points, random_target_points
+        ).homography
+
+        # 3. Apply the homography to all source_points
+        transformed_source_points = apply_homography(homography, source_points)
+        # transformed_source_points = cv2.perspectiveTransform(
+        #    np.array([source_points], dtype=np.float32), homography
+        # ).reshape(-1, 2)
+
+        # 4. Calculate the euclidean distance between the transformed source_points and the target_points
+        errors = np.linalg.norm(transformed_source_points - target_points, axis=1)
+        error = np.sum(errors)
+
+        # 5. If the euclidean distance is smaller than the inlier_threshold, the match is an inlier
+        inliers = errors < inlier_threshold
+        inlier_count = np.sum(inliers)
+
+        # 6. Store the inliers if there are more inliers than the best inliers
+        if inlier_count > best_inlier_count:
+            best_error = error
+            best_inlier_count = inlier_count
+            best_inliers = inliers
+            debug_chosen_source_points = random_source_points
+
+    # If there are more inliers we allow a higher error
+    error_measure = best_error / max(best_inlier_count, 1)
+
+    # 7. Find the homography with the most inliers
+    best_source_points = source_points[best_inliers]
+    best_target_points = target_points[best_inliers]
+    if best_inlier_count < min_required_inlier_count:
+        return FindHomographyResult(None, best_inliers, 0)
+    final_homography = find_homography_eq(
+        best_source_points, best_target_points
+    ).homography
+
+    # distortion = calculate_homography_distortion(
+    #    final_homography, np.array([[0, 0], [1, 0], [1, 1], [0, 1]])
+    # )
+    # ic(distortion)
+
+    # Filter too heavy distortions
+    det = np.linalg.det(final_homography)
+    cond = np.linalg.cond(final_homography)
+    # ic(det, cond)
+    # the following values were empirically determined
+    if det < 0.05 or det > 20 or cond > 10**6:
+        # ic(f"Det {det} too small or Cond {cond} too high")
+        return FindHomographyResult(None, best_inliers, 0)
+
+    return FindHomographyResult(
+        final_homography, best_inliers, number_of_iterations, debug_chosen_source_points
+    )
 
 
 @dataclass
@@ -411,7 +570,7 @@ class ObjectRecognitionResult:
     detected_objects_descriptors: list[np.array]
     detected_scenes_keypoints: list[list[cv2.KeyPoint]]
     detected_scenes_descriptors: list[np.array]
-    object_scene_matches: list[list[cv2.DMatch]]
+    object_scene_matches: list[list[cv2.DMatch]]  # [object_index][scene_index]
 
 
 def run_object_recognition(

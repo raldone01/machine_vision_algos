@@ -3,9 +3,18 @@ import asyncio
 import ipywidgets as wid
 from ipywidgets import Layout
 
+# glayout = Layout(width="auto")
+glayout = Layout(width="max-content")
+
 widgets_styling = {
-    "layout": Layout(width="auto"),
+    "layout": glayout,
     "style": {"description_width": "initial"},
+}
+
+widgets_styling_slider = {
+    "style": {
+        "description_width": "initial",
+    }
 }
 
 
@@ -27,7 +36,7 @@ class MultiSelect:
             )
 
         self._checkboxes = [
-            wid.Checkbox(description=choice, value=True, layout=Layout(width="auto"))
+            wid.Checkbox(description=choice, value=True, layout=glayout)
             for choice in all_choices
         ]
 
@@ -118,8 +127,7 @@ class RadioSelect:
             )
 
         self._radio_buttons = [
-            wid.RadioButtons(options=[choice], layout=Layout(width="max-content"))
-            for choice in all_choices
+            wid.RadioButtons(options=[choice], layout=glayout) for choice in all_choices
         ]
 
         # Process selection state for the default choice

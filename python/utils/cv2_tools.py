@@ -64,6 +64,7 @@ def draw_matches(
     image_2_i: np.array,
     keypoints_2: list,
     matches: list,
+    params: dict = {},
 ) -> np.array:
     max_size = max(*image_1_i.shape, *image_2_i.shape)
     thickness = int(max(np.round(max_size / 300), 1))
@@ -77,4 +78,5 @@ def draw_matches(
         None,
         matchesThickness=max(thickness // 2, 1),
         flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
+        **params,
     )
