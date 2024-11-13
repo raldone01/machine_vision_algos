@@ -335,7 +335,8 @@ def find_homography_eq(
     assert source_points.shape == target_points.shape
 
     n = source_points.shape[0]
-    assert n >= 4
+    if n < 4:
+        return FindHomographyResult(None, None, None)
 
     if not use_svd:
         # create the A matrix
