@@ -49,6 +49,18 @@ Find it here [`rd_vec_v4_dibit.py`](python/canny/canny_impls/rd_vec_v4_dibit.py)
 * Benchmark notebook: Add system information like gpu, cpu, ram, ...
 * Visualize gauss radius outline for sigma sliders
 
+## Image stitching and points of interest
+
+[See more `python/points_of_interest`.](python/points_of_interest)
+
+[`python/points_of_interest/points_of_interest.ipynb`](python/points_of_interest/points_of_interest.ipynb) is an interactive notebook that allows one to play around with image stitching and points of interest algorithms.
+
+It implements the following algorithms:
+* Harris corner detector
+* Descriptor computation
+* Random sample consensus (RANSAC)
+* Image stitching using SIFT and FLANN
+
 ## Contributions
 
 Contributions are welcome!

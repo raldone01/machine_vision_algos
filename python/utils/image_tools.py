@@ -73,3 +73,21 @@ def load_image(image_path: Path) -> LoadedImage:
         image.image_color = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
         image.image_gray = cv2.cvtColor(image.image_color, cv2.COLOR_BGR2GRAY)
     return image
+
+
+def save_image(image_buf_i: np.ndarray, file_path: Path):
+    """Saves the image to the specified path
+
+    :param image: LoadedImage object with the image to be saved
+    :type image: LoadedImage
+
+    :param file_path: Path to save the image to
+    :type file_path: Path
+    """
+
+    if isinstance(file_path, str):
+        file_path = Path(file_path)
+
+    with LogTimer(f"Saving {file_path.name}"):
+        cv2.imwrite(str(file_path), image_buf_i)
+    return

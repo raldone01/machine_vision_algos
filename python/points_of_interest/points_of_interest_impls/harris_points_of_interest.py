@@ -267,11 +267,11 @@ def _setup_flann():
 
 
 def flann_matches(
-    descriptors1: np.ndarray, descriptors2: np.ndarray
+    query_descriptors: np.ndarray, train_descriptors: np.ndarray
 ) -> list[cv2.DMatch]:
     flann = _setup_flann()
     matches = flann.knnMatch(
-        descriptors1.astype(np.float32), descriptors2.astype(np.float32), k=2
+        query_descriptors.astype(np.float32), train_descriptors.astype(np.float32), k=2
     )
     return matches
 

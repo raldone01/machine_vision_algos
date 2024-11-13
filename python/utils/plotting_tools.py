@@ -13,10 +13,11 @@ open_cnt = 0
 
 SMALL_SIZE = 22
 MEDIUM_SIZE = 26
-BIGGER_SIZE = 60
+BIGGER_SIZE = 30
+BIGGEST_SIZE = 60
 
 rc_params_better = {
-    "figure.titlesize": BIGGER_SIZE,
+    "figure.titlesize": BIGGEST_SIZE,
     "font.size": SMALL_SIZE,
     "axes.titlesize": BIGGER_SIZE,
     "axes.labelsize": MEDIUM_SIZE,
