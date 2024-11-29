@@ -116,13 +116,21 @@ def _harris_corner(
     i_xy = i_x * i_y
 
     # weigh the gradients by gauss_2_kernel
-    i_x = cv2.filter2D(src=i_x, ddepth=-1, kernel=gauss_2_kernel)
-    i_y = cv2.filter2D(src=i_y, ddepth=-1, kernel=gauss_2_kernel)
+    i_xx = cv2.filter2D(src=i_x**2, ddepth=-1, kernel=gauss_2_kernel)
+    i_yy = cv2.filter2D(src=i_y**2, ddepth=-1, kernel=gauss_2_kernel)
     i_xy = cv2.filter2D(src=i_xy, ddepth=-1, kernel=gauss_2_kernel)
 
-    M_matrices = np.stack([i_x**2, i_xy, i_xy, i_y**2], axis=-1).reshape(
-        height, width, 2, 2
+    # M_matrices = np.empty((height, width, 2, 2))
+    # M_matrices[:, :, 0, 0] = i_xx
+    # M_matrices[:, :, 0, 1] = i_xy
+    # M_matrices[:, :, 1, 0] = i_xy
+    # M_matrices[:, :, 1, 1] = i_yy
+
+    M_matrices = np.stack(
+        (np.stack((i_xx, i_xy), axis=-1), np.stack((i_xy, i_yy), axis=-1)), axis=-2
     )
+
+    # assert np.allclose(M_matrices, M_matrices_stacked)
 
     # Compute the corner response
     det_M = np.linalg.det(M_matrices)
@@ -471,38 +479,48 @@ def find_homography_ransac(
 
     # calculate the number of iterations based on the confidence
     number_of_points = source_points.shape[0]
-    number_of_model_points = 4
+    m_number_of_model_points = 4
 
-    if number_of_points < number_of_model_points:
+    if number_of_points < m_number_of_model_points:
+        print("Not enough points")
         return FindHomographyResult(
             None,
             np.full(len(target_points), fill_value=False, dtype=bool),
             0,
         )
 
-    number_of_iterations_float = (
+    max_number_of_iterations = int(
         np.log(1 - confidence)
         / np.log(
             1
-            - number_of_model_points
+            - m_number_of_model_points
             / number_of_points
-            * (number_of_model_points - 1)
+            * (m_number_of_model_points - 1)
             / (number_of_points - 1)
         )
         * 2
     )
 
-    number_of_iterations = int(number_of_iterations_float)
-
-    best_inlier_count = 0
+    best_inlier_count = m_number_of_model_points / number_of_points
     best_inliers = np.full(len(target_points), fill_value=False, dtype=bool)
-    best_error = np.inf
-    debug_chosen_source_points = np.full((0, 2), fill_value=np.nan)
+    debug_chosen_source_points = []
 
-    for _ in range(number_of_iterations):
-        # 1. Sample four unique matches randomly
+    for k in range(max_number_of_iterations):
+        percentage_of_inliers = best_inlier_count / number_of_points
+        # print(f"percentage_of_inliers: {percentage_of_inliers} k: {k}")
+        current_confidence = (
+            1 - (1 - percentage_of_inliers**m_number_of_model_points) ** k
+        )
+        # print(f"current_confidence: {current_confidence}")
+        if current_confidence > confidence:
+            print(
+                f"Reached confidence {current_confidence} (treshold {confidence}) after {k} iterations (max {max_number_of_iterations})"
+            )
+            break
+
+        # 1. Sample three unique matches randomly
         random_indices = rng.choice(
-            number_of_points, size=number_of_model_points, replace=False
+            number_of_points, size=m_number_of_model_points, replace=False
         )
 
         random_source_points = source_points[random_indices]
@@ -521,7 +539,6 @@ def find_homography_ransac(
 
         # 4. Calculate the euclidean distance between the transformed source_points and the target_points
         errors = np.linalg.norm(transformed_source_points - target_points, axis=1)
-        error = np.sum(errors)
 
         # 5. If the euclidean distance is smaller than the inlier_threshold, the match is an inlier
         inliers = errors < inlier_threshold
@@ -529,22 +546,26 @@ def find_homography_ransac(
 
         # 6. Store the inliers if there are more inliers than the best inliers
         if inlier_count > best_inlier_count:
-            best_error = error
             best_inlier_count = inlier_count
             best_inliers = inliers
             debug_chosen_source_points = random_source_points
 
-    # If there are more inliers we allow a higher error
-    error_measure = best_error / max(best_inlier_count, 1)
-
     # 7. Find the homography with the most inliers
     best_source_points = source_points[best_inliers]
     best_target_points = target_points[best_inliers]
+
     if best_inlier_count < min_required_inlier_count:
+        print(
+            f"Not enough inliers {best_inlier_count} minimum {min_required_inlier_count}"
+        )
         return FindHomographyResult(None, best_inliers, 0)
     final_homography = find_homography_eq(
         best_source_points, best_target_points
     ).homography
+    # calculate the inliers again with the final homography
+    transformed_source_points = apply_homography(final_homography, source_points)
+    errors = np.linalg.norm(transformed_source_points - target_points, axis=1)
+    best_inliers = errors < inlier_threshold
 
     # distortion = calculate_homography_distortion(
     #    final_homography, np.array([[0, 0], [1, 0], [1, 1], [0, 1]])
@@ -556,12 +577,12 @@ def find_homography_ransac(
     cond = np.linalg.cond(final_homography)
     # ic(det, cond)
     # the following values were empirically determined
-    if det < 0.05 or det > 20 or cond > 10**6:
-        # ic(f"Det {det} too small or Cond {cond} too high")
+    if det < 0.05 or det > 20 or cond > 10**8:
+        print(f"Det {det} too small or Cond {cond} too high")
         return FindHomographyResult(None, best_inliers, 0)
 
     return FindHomographyResult(
-        final_homography, best_inliers, number_of_iterations, debug_chosen_source_points
+        final_homography, best_inliers, k, debug_chosen_source_points
     )
 
 
